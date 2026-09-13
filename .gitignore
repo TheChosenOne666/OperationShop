@@ -1,0 +1,19 @@
+# 环境与本地配置
+.env
+.local/
+
+# 生成物
+outputs/
+
+# 引擎工程缓存（Cocos Creator 3.8.8）
+# NewProject/.gitignore 里已有声明，这里在仓库根再兜一层，避免误提交缓存
+NewProject/library/
+NewProject/temp/
+NewProject/local/
+NewProject/build/
+NewProject/profiles/
+
+# 智能体工作目录：本地运行状态，不入库
+# 项目知识已沉淀在 docs/ 与 design/ 中，无需重复入库
+.workbuddy/
+.workbuddy-ai/

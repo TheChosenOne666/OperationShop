@@ -1,0 +1,14 @@
+{
+  "rulesVersion": "m01-prototype-v1",
+  "initialCoins": 1280,
+  "dailyVisitors": 50,
+  "visitorIntervalSeconds": 5,
+  "businessTimezone": "Asia/Shanghai",
+  "shops": [
+    { "id": "clothing", "name": "衣橱", "floor": 2, "slot": 1, "coinsPerVisitor": 12 },
+    { "id": "dessert", "name": "甜屋", "floor": 2, "slot": 2, "coinsPerVisitor": 8 },
+    { "id": "bookstore", "name": "书店", "floor": 2, "slot": 3, "coinsPerVisitor": 10 },
+    { "id": "coffee", "name": "咖啡", "floor": 1, "slot": 1, "coinsPerVisitor": 6 },
+    { "id": "flowers", "name": "花束", "floor": 1, "slot": 2, "coinsPerVisitor": 9 }
+  ]
+}
