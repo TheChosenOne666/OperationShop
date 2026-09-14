@@ -17,3 +17,7 @@ NewProject/profiles/
 # 项目知识已沉淀在 docs/ 与 design/ 中，无需重复入库
 .workbuddy/
 .workbuddy-ai/
+
+# 模块任务的中间产物（切片、临时脚本输出），不入库
+# 最终素材落在 assets/，可复现的管线脚本如需留存应移到 tools/
+.work/

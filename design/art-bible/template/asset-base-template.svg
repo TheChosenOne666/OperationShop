@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  《街角百货铺》资产基准模板（Asset Base Template）v1.0
+  用途：生成/重绘任何素材时，把本图垫在画布下，越界肉眼可见。
+  依据：design/art-bible/美术圣经.md v1.2（§4.2 纵向分区 / §4.3 横向分区 / §6.1 HUD）
+        design/art-bible/资产基准模板与生成提示词.md v1.1（§1.2 安全框 / §1.4 光照色板 / §1.8 强制流程 / §1.9 命名）
+  设计分辨率：750×1334（9:16，Fit Height）
+  注意：本文件是"垫图/检查卡"，不是美术资产，不参与构建、不进包。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="750" height="1334" viewBox="0 0 750 1334" font-family="sans-serif">
+
+  <!-- ===== 画布底 ===== -->
+  <rect x="0" y="0" width="750" height="1334" fill="#EFE7DA"/>
+
+  <!-- ===== 纵向分区（@750，来源：美术圣经 §4.2）===== -->
+  <!-- 顶部避让区 0-48：不放任何需要阅读的信息（状态栏 + 微信系统胶囊） -->
+  <rect x="0" y="0" width="750" height="48" fill="#C94A38" opacity="0.18"/>
+  <line x1="0" y1="48" x2="750" y2="48" stroke="#C94A38" stroke-dasharray="6 4"/>
+
+  <!-- 招牌雨棚区 48-174 -->
+  <rect x="0" y="48" width="750" height="126" fill="#6E8269" opacity="0.14"/>
+  <line x1="0" y1="174" x2="750" y2="174" stroke="#586B58" stroke-dasharray="6 4"/>
+
+  <!-- 二层铺位立面 174-487 -->
+  <rect x="0" y="174" width="750" height="313" fill="#A8764E" opacity="0.10"/>
+  <line x1="0" y1="487" x2="750" y2="487" stroke="#8F6049" stroke-dasharray="6 4"/>
+
+  <!-- 二层木栏杆 487-577 -->
+  <rect x="0" y="487" width="750" height="90" fill="#8F6049" opacity="0.16"/>
+  <line x1="0" y1="577" x2="750" y2="577" stroke="#6B4B3A" stroke-dasharray="6 4"/>
+
+  <!-- 一层临街 577-1070（画面最大区块） -->
+  <rect x="0" y="577" width="750" height="493" fill="#A8764E" opacity="0.10"/>
+  <line x1="0" y1="1070" x2="750" y2="1070" stroke="#8F6049" stroke-dasharray="6 4"/>
+
+  <!-- 铺前街面 1070-1174 -->
+  <rect x="0" y="1070" width="750" height="104" fill="#A85F3C" opacity="0.14"/>
+  <line x1="0" y1="1174" x2="750" y2="1174" stroke="#A85F3C" stroke-dasharray="6 4"/>
+
+  <!-- HUD 禁放区（HUD 之上 53px）1121-1174 -->
+  <rect x="0" y="1121" width="750" height="53" fill="#EFB021" opacity="0.20"/>
+  <line x1="0" y1="1121" x2="750" y2="1121" stroke="#C88A10" stroke-dasharray="4 4"/>
+
+  <!-- 底部 HUD 区 1174-1334（背景图不画 HUD） -->
+  <rect x="0" y="1174" width="750" height="160" fill="#4A2F1E" opacity="0.22"/>
+
+  <!-- ===== 横向安全边距 22px ===== -->
+  <line x1="22" y1="0" x2="22" y2="1334" stroke="#C94A38" stroke-dasharray="4 6"/>
+  <line x1="728" y1="0" x2="728" y2="1334" stroke="#C94A38" stroke-dasharray="4 6"/>
+
+  <!-- ===== 二层：3 铺位（228 + 11 墙垛）===== -->
+  <g fill="none" stroke="#3C4E3C" stroke-width="2">
+    <rect x="22"  y="174" width="228" height="313"/>
+    <rect x="261" y="174" width="228" height="313"/>
+    <rect x="500" y="174" width="228" height="313"/>
+  </g>
+  <!-- 墙垛 11px -->
+  <rect x="250" y="174" width="11" height="313" fill="#6B4B3A" opacity="0.5"/>
+  <rect x="489" y="174" width="11" height="313" fill="#6B4B3A" opacity="0.5"/>
+
+  <!-- 铺位安全框（四周内缩 8%）示例：二层单铺位 228×313 → 安全框 210×288 -->
+  <rect x="31" y="183" width="210" height="288" fill="none" stroke="#C94A38" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="36" y="200" font-size="12" fill="#C94A38">安全框内缩 8%（210×288）</text>
+
+  <!-- ===== 一层：咖啡 345 + 楼梯 60→92 + 花束 265 ===== -->
+  <g fill="none" stroke="#3C4E3C" stroke-width="2">
+    <rect x="22"  y="577" width="345" height="493"/>
+    <rect x="459" y="577" width="265" height="493"/>
+  </g>
+  <!-- 楼梯（斜向，下宽上窄） -->
+  <polygon points="367,577 459,577 467,1070 359,1070" fill="#8F6049" opacity="0.25" stroke="#6B4B3A" stroke-dasharray="5 4"/>
+  <text x="372" y="600" font-size="12" fill="#4A2F1E">楼梯</text>
+
+  <!-- 一层安全框示例：咖啡 345×493 → 317×454 -->
+  <rect x="36" y="596" width="317" height="454" fill="none" stroke="#C94A38" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <!-- 一层安全框示例：花束 265×493 → 244×454 -->
+  <rect x="470" y="596" width="244" height="454" fill="none" stroke="#C94A38" stroke-width="1.5" stroke-dasharray="5 4"/>
+
+  <!-- ===== 视觉重心 58%–62%（y 775–830）===== -->
+  <rect x="0" y="775" width="750" height="55" fill="#EFB021" opacity="0.10"/>
+  <line x1="0" y1="775" x2="750" y2="775" stroke="#C88A10" stroke-dasharray="3 5"/>
+  <line x1="0" y1="830" x2="750" y2="830" stroke="#C88A10" stroke-dasharray="3 5"/>
+  <text x="8" y="795" font-size="12" fill="#C88A10">视觉重心 58–62%</text>
+
+  <!-- ===== 光源方向：左上 30–45° → 影向右下 ===== -->
+  <g stroke="#E8A868" stroke-width="3" fill="none">
+    <line x1="60" y1="60" x2="180" y2="180"/>
+    <polygon points="180,180 168,174 174,168" fill="#E8A868" stroke="none"/>
+  </g>
+  <text x="62" y="52" font-size="13" fill="#C88A10">主光 左上 30–45°</text>
+  <text x="188" y="196" font-size="13" fill="#C88A10">影 → 右下</text>
+
+  <!-- ===== 色板色卡（来源：美术圣经 §2.2）===== -->
+  <g font-size="11">
+    <rect x="560" y="60" width="24" height="24" fill="#6E8269"/><text x="588" y="77" fill="#4A2F1E">green-brand</text>
+    <rect x="560" y="88" width="24" height="24" fill="#3C4E3C"/><text x="588" y="105" fill="#4A2F1E">green-deep</text>
+    <rect x="560" y="116" width="24" height="24" fill="#A8764E"/><text x="588" y="133" fill="#4A2F1E">wood-mid</text>
+    <rect x="560" y="144" width="24" height="24" fill="#8F6049"/><text x="588" y="161" fill="#4A2F1E">wood-base</text>
+    <rect x="560" y="172" width="24" height="24" fill="#4A2F1E"/><text x="588" y="189" fill="#4A2F1E">wood-line</text>
+    <rect x="560" y="200" width="24" height="24" fill="#E4D8C6"/><text x="588" y="217" fill="#4A2F1E">cream-bg</text>
+    <rect x="560" y="228" width="24" height="24" fill="#F2DDAE"/><text x="588" y="245" fill="#4A2F1E">glow-window</text>
+    <rect x="560" y="256" width="24" height="24" fill="#E8A868"/><text x="588" y="273" fill="#4A2F1E">sun-tint</text>
+    <rect x="560" y="284" width="24" height="24" fill="#EFB021"/><text x="588" y="301" fill="#4A2F1E">gold</text>
+    <rect x="560" y="312" width="24" height="24" fill="#CFC6B8"/><text x="588" y="329" fill="#4A2F1E">veil-neutral</text>
+  </g>
+
+  <!-- ===== 分区标注 ===== -->
+  <g font-size="13" fill="#4A2F1E">
+    <text x="8" y="34">顶部避让区 0–48（不放信息）</text>
+    <text x="8" y="112">招牌雨棚区 48–174</text>
+    <text x="8" y="192">二层铺位立面 174–487（3 铺位 228 + 墙垛 11）</text>
+    <text x="8" y="505">二层木栏杆 487–577（橘猫常驻）</text>
+    <text x="8" y="640">一层临街 577–1070（咖啡 345 / 楼梯 / 花束 265）</text>
+    <text x="8" y="1090">铺前街面 1070–1174</text>
+    <text x="8" y="1150">HUD 禁放区 1121–1174（不放信息）</text>
+    <text x="8" y="1210">底部 HUD 1174–1334（背景图不画 HUD）</text>
+  </g>
+
+  <text x="8" y="1320" font-size="12" fill="#4A2F1E">垫图用 · 非美术资产 · 依据 美术圣经 v1.2 §4.2/§4.3/§6.1 与 基准模板 v1.1 §1.2/§1.4/§1.8</text>
+</svg>
