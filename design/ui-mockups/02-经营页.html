@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>街角百货铺 · 经营页</title>
+<style>
+:root{
+  --green-brand:#6E8269; --green-light:#93A282; --green-mid:#586B58; --green-deep:#3C4E3C; --green-shadow:#33452F;
+  --wood-pale:#E8C88A; --wood-light:#C89A6E; --wood-mid:#A8764E; --wood-base:#8F6049; --wood-dark:#6B4B3A; --wood-line:#4A2F1E;
+  --cream-bg:#E4D8C6; --cream-bright:#F2E8D8; --cream-warm:#D9BFA0;
+  --glow-window:#F2DDAE; --glow-core:#FFF0C8; --sun-tint:#E8A868; --brick:#A85F3C;
+  --gold:#EFB021; --gold-light:#F7DC63; --gold-deep:#C88A10;
+  --blossom:#F2CB9E; --veil:#CFC6B8;
+  --font: "Alibaba PuHuiTi","AlibabaPuHuiTi","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:#453E37;padding:40px;display:flex;justify-content:center;align-items:flex-start;gap:36px;flex-wrap:wrap}
+.phone{width:750px;height:1334px;position:relative;overflow:hidden;background:var(--cream-bg);box-shadow:0 24px 60px rgba(0,0,0,.45);flex:none}
+.safe{position:absolute;top:0;left:0;width:100%;height:48px}
+
+.topbar{position:absolute;top:48px;left:0;width:100%;height:88px;display:flex;align-items:center;padding:0 22px;gap:16px}
+.back{width:64px;height:64px;border-radius:50%;background:linear-gradient(160deg,var(--wood-mid),var(--wood-base));
+  border:3px solid var(--wood-line);box-shadow:inset 0 3px 0 var(--wood-light),0 3px 0 rgba(74,47,30,.35);display:flex;align-items:center;justify-content:center;flex:none}
+.back i{width:20px;height:20px;border-left:6px solid var(--wood-pale);border-bottom:6px solid var(--wood-pale);transform:rotate(45deg);margin-left:6px;border-radius:2px}
+.title{font-size:34px;font-weight:900;color:var(--wood-line);letter-spacing:.02em}
+
+/* 今日概览 */
+.today{position:absolute;top:150px;left:22px;width:706px;height:112px;background:linear-gradient(180deg,var(--cream-bright),var(--cream-bg));
+  border:3px solid var(--wood-line);border-radius:12px;padding:0 20px;display:flex;align-items:center;gap:14px}
+.tcell{flex:1;text-align:center}
+.tcell .k{font-size:21px;font-weight:700;color:var(--wood-dark);opacity:.8}
+.tcell .v{font-size:36px;font-weight:900;color:var(--wood-line);margin-top:4px;line-height:1.1}
+.tcell .v small{font-size:22px;opacity:.6}
+.tcell .v.gold{color:var(--gold-deep)}
+.tsep{width:3px;background:var(--wood-line);opacity:.18;border-radius:2px}
+
+/* 排序说明条 */
+.orderbar{position:absolute;top:286px;left:22px;width:706px;height:40px;display:flex;align-items:center;gap:10px;
+  font-size:21px;font-weight:700;color:var(--wood-dark)}
+.orderbar .bar{width:8px;height:24px;border-radius:4px;background:var(--green-brand)}
+
+/* 店铺行 */
+.list{position:absolute;top:336px;left:22px;width:706px;display:flex;flex-direction:column;gap:8px}
+.row{height:146px;border-radius:12px;border:3px solid var(--wood-line);background:var(--cream-bright);
+  box-shadow:inset 0 3px 0 #fffaf0;display:flex;align-items:center;gap:16px;padding:0 16px}
+.thumb{width:104px;height:104px;border-radius:9px;border:3px solid var(--wood-line);overflow:hidden;position:relative;flex:none;background:var(--cream-bg)}
+/* 缩略店面（正视图） */
+.awning{position:absolute;left:-4%;top:0;width:108%;height:26px;background:var(--green-brand);border-radius:4px 4px 0 0;
+  box-shadow:inset 0 3px 0 rgba(147,162,130,.5)}
+.awning.stripe{background:repeating-linear-gradient(90deg,var(--blossom) 0 11px,#F7F0E2 11px 22px)}
+.win{position:absolute;left:14%;top:38px;width:72%;height:50px;border:2px solid var(--wood-line);border-radius:3px;
+  background:linear-gradient(180deg,var(--glow-core),var(--glow-window) 58%,var(--sun-tint));overflow:hidden}
+.win::after{content:"";position:absolute;left:16%;top:-14%;width:16%;height:128%;background:rgba(255,255,255,.16);transform:rotate(19deg)}
+.veil{position:absolute;inset:0;background:var(--veil);opacity:.35}
+.row.locked .thumb{filter:brightness(.74) saturate(.5)}
+.row.locked .awning{background:var(--veil)}
+
+.info{flex:1;min-width:0}
+.nm{font-size:28px;font-weight:900;color:var(--wood-line);display:flex;align-items:center;gap:10px}
+.lv{font-size:19px;font-weight:900;color:var(--wood-pale);background:var(--wood-base);border:2px solid var(--wood-line);
+  border-radius:6px;padding:1px 8px}
+.sub{font-size:22px;font-weight:700;color:var(--wood-dark);margin-top:4px;line-height:1.3}
+.sub2{font-size:20px;font-weight:700;color:var(--wood-dark);opacity:.88;margin-top:2px;line-height:1.3}
+.sub b{color:var(--gold-deep)}
+.sub .plus{color:var(--green-deep);font-weight:900}
+
+/* 行内操作 / 状态 */
+.act{flex:none;text-align:center;min-width:132px}
+.btn-open{width:132px;height:80px;border-radius:12px;border:3px solid var(--wood-line);
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base));box-shadow:inset 0 3px 0 var(--wood-light),0 3px 0 rgba(74,47,30,.35);
+  display:flex;align-items:center;justify-content:center;position:relative}
+.btn-open span{font-size:27px;font-weight:900;color:var(--cream-bright);
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.btn-open .plus{position:absolute;top:-11px;right:-11px;width:42px;height:42px;border-radius:50%;
+  background:var(--gold);border:3px solid var(--wood-line);display:flex;align-items:center;justify-content:center}
+.btn-open .plus::before{content:"";width:6px;height:22px;background:var(--wood-line);border-radius:3px}
+.btn-open .plus::after{content:"";position:absolute;width:22px;height:6px;background:var(--wood-line);border-radius:3px}
+.state{display:flex;flex-direction:column;align-items:center;gap:6px}
+.state .tick{width:46px;height:46px;border-radius:50%;background:var(--green-brand);border:3px solid var(--wood-line);position:relative}
+.state .tick::after{content:"";position:absolute;left:12px;top:13px;width:18px;height:9px;border-left:5px solid var(--cream-bright);
+  border-bottom:5px solid var(--cream-bright);transform:rotate(-45deg);border-radius:2px}
+.state .txt{font-size:21px;font-weight:900;color:var(--green-deep)}
+.state .txt.mute{color:var(--wood-dark);opacity:.85}
+.lockchip{width:46px;height:46px;border-radius:10px;background:var(--veil);border:3px solid var(--wood-line);
+  display:flex;align-items:center;justify-content:center;position:relative}
+.lockchip::before{content:"";width:15px;height:13px;background:var(--wood-line);border-radius:2px;margin-top:7px}
+.lockchip::after{content:"";position:absolute;top:8px;width:13px;height:11px;border:4px solid var(--wood-line);border-bottom:0;border-radius:7px 7px 0 0}
+
+/* HUD */
+.hud{position:absolute;bottom:0;left:0;width:750px;height:160px;
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base) 42%,var(--wood-dark));
+  border-top:5px solid var(--wood-line);box-shadow:inset 0 6px 0 var(--wood-light)}
+.hud::before{content:"";position:absolute;inset:0;opacity:.16;
+  background:repeating-linear-gradient(180deg,rgba(74,47,30,.5) 0 1px,transparent 1px 9px)}
+.nozone{position:absolute;bottom:160px;left:0;width:750px;height:53px;
+  background:repeating-linear-gradient(45deg,rgba(201,74,56,.10) 0 12px,transparent 12px 24px)}
+.hud .coin{position:absolute;left:30px;top:52px;display:flex;align-items:center;gap:12px}
+.cicon{width:48px;height:48px;border-radius:50%;background:radial-gradient(circle at 34% 30%,var(--gold-light),var(--gold) 52%,var(--gold-deep));
+  border:3px solid var(--wood-line);box-shadow:inset 0 3px 0 rgba(255,255,255,.35);flex:none;position:relative}
+.cicon::after{content:"";position:absolute;left:14px;top:14px;width:16px;height:12px;border-top:4px solid var(--wood-line);border-bottom:4px solid var(--wood-line)}
+.cval{font-size:40px;font-weight:900;color:var(--cream-bright);
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.nav{position:absolute;left:50%;transform:translateX(-50%);top:20px;display:flex;gap:26px}
+.nb{width:96px;text-align:center}
+.nb .ring{width:96px;height:96px;border-radius:50%;background:linear-gradient(170deg,var(--wood-mid),var(--wood-base));
+  border:4px solid var(--wood-line);box-shadow:inset 0 4px 0 var(--wood-light);position:relative;margin:0 auto}
+.nb .lbl{font-size:22px;font-weight:900;color:var(--cream-bright);margin-top:4px;
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.nb.active .ring{transform:translateY(2px);filter:brightness(.88);box-shadow:inset 0 6px 10px rgba(0,0,0,.35)}
+.ic{position:absolute;inset:26px}
+.ic span{position:absolute;background:var(--wood-pale);border-radius:3px}
+.hud .vis{position:absolute;right:30px;top:56px;display:flex;align-items:center;gap:10px}
+.vicon{width:36px;height:36px;border-radius:50%;background:var(--cream-bright);border:3px solid var(--wood-line);position:relative;flex:none}
+.vicon::after{content:"";position:absolute;left:9px;top:7px;width:12px;height:12px;border-radius:50%;background:var(--wood-line)}
+.vnum{font-size:28px;font-weight:900;color:var(--cream-bright);text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.vmax{font-size:24px;font-weight:900;color:var(--cream-bright);opacity:.7;text-shadow:0 2px 0 var(--wood-line)}
+
+/* 规格面板 */
+.spec{width:420px;color:#EDE6DC;font-size:13px;line-height:1.85}
+.spec h1{font-size:19px;margin-bottom:14px;color:#fff}
+.spec h2{font-size:14px;margin:16px 0 6px;color:var(--gold-light)}
+.spec ul{margin-left:16px}
+.spec code{background:rgba(255,255,255,.1);padding:1px 5px;border-radius:3px;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="phone">
+  <div class="safe"></div>
+
+  <div class="topbar">
+    <div class="back"><i></i></div>
+    <div class="title">经营</div>
+  </div>
+
+  <!-- 今日概览 -->
+  <div class="today">
+    <div class="tcell"><div class="k">今日客流</div><div class="v">38<small>/50</small></div></div>
+    <div class="tsep"></div>
+    <div class="tcell"><div class="k">今日收益</div><div class="v gold">+332</div></div>
+    <div class="tsep"></div>
+    <div class="tcell"><div class="k">满铺加成</div><div class="v" style="font-size:26px;padding-top:8px">一层生效</div></div>
+  </div>
+
+  <div class="orderbar"><div class="bar"></div>按客流到店顺序排列（一层临街优先）</div>
+
+  <!-- 店铺列表：按客流轮询顺序 -->
+  <div class="list" style="top:336px">
+    <!-- 咖啡 Lv2 营业中 -->
+    <div class="row">
+      <div class="thumb"><div class="awning stripe"></div><div class="win"></div></div>
+      <div class="info">
+        <div class="nm">咖啡<span class="lv">Lv2</span></div>
+        <div class="sub">单客 <b>8</b> 金币 <span class="plus">(7+满铺1)</span></div>
+        <div class="sub2">累计 24 客流 · 192 金币</div>
+      </div>
+      <div class="act"><div class="state"><div class="tick"></div><div class="txt">营业中</div></div></div>
+    </div>
+
+    <!-- 花束 Lv1 营业中 -->
+    <div class="row">
+      <div class="thumb"><div class="awning stripe"></div><div class="win"></div></div>
+      <div class="info">
+        <div class="nm">花束<span class="lv">Lv1</span></div>
+        <div class="sub">单客 <b>10</b> 金币 <span class="plus">(9+满铺1)</span></div>
+        <div class="sub2">累计 14 客流 · 140 金币</div>
+      </div>
+      <div class="act"><div class="state"><div class="tick"></div><div class="txt">营业中</div></div></div>
+    </div>
+
+    <!-- 衣橱 Lv1 待开业 → 开业按钮 -->
+    <div class="row">
+      <div class="thumb"><div class="awning"></div><div class="win"></div></div>
+      <div class="info">
+        <div class="nm">衣橱<span class="lv">Lv1</span></div>
+        <div class="sub">单客 <b>12</b> 金币</div>
+        <div class="sub2">尚未开业 · 累计 0</div>
+      </div>
+      <div class="act"><div class="btn-open"><span>开业</span><div class="plus"></div></div></div>
+    </div>
+
+    <!-- 甜屋 未开放 -->
+    <div class="row locked">
+      <div class="thumb"><div class="awning"></div><div class="win"></div><div class="veil"></div></div>
+      <div class="info">
+        <div class="nm">甜屋</div>
+        <div class="sub" style="opacity:.85">未开放 · 需先在布局页解锁铺位（800 金币）</div>
+      </div>
+      <div class="act"><div class="state"><div class="lockchip"></div><div class="txt mute">未开放</div></div></div>
+    </div>
+
+    <!-- 书店 未开放 -->
+    <div class="row locked">
+      <div class="thumb"><div class="awning"></div><div class="win"></div><div class="veil"></div></div>
+      <div class="info">
+        <div class="nm">书店</div>
+        <div class="sub" style="opacity:.85">未开放 · 需先解锁二层 2 号铺位</div>
+      </div>
+      <div class="act"><div class="state"><div class="lockchip"></div><div class="txt mute">未开放</div></div></div>
+    </div>
+  </div>
+
+  <div class="nozone"></div>
+
+  <!-- HUD -->
+  <div class="hud">
+    <div class="coin"><div class="cicon"></div><div class="cval">1012</div></div>
+    <div class="nav">
+      <div class="nb active"><div class="ring"><div class="ic" style="inset:28px">
+        <span style="left:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="right:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="left:50%;bottom:0;width:34px;height:16px;margin-left:-17px;background:none;border:3px solid var(--wood-pale);border-radius:2px 2px 0 0"></span>
+      </div></div><div class="lbl">经营</div></div>
+      <div class="nb"><div class="ring"><div class="ic">
+        <span style="left:0;top:0;width:16px;height:16px"></span><span style="left:24px;top:0;width:16px;height:16px"></span><span style="right:0;top:0;width:16px;height:16px"></span>
+        <span style="left:0;top:24px;width:16px;height:16px"></span><span style="left:24px;top:24px;width:16px;height:16px"></span><span style="right:0;top:24px;width:16px;height:16px"></span>
+        <span style="left:0;bottom:0;width:16px;height:16px"></span><span style="left:24px;bottom:0;width:16px;height:16px"></span><span style="right:0;bottom:0;width:16px;height:16px"></span>
+      </div></div><div class="lbl">布局</div></div>
+      <div class="nb"><div class="ring"><div class="ic">
+        <span style="left:50%;top:4px;width:20px;height:20px;margin-left:-10px;border-radius:50%"></span>
+        <span style="left:50%;bottom:2px;width:38px;height:20px;margin-left:-19px;border-radius:12px 12px 0 0"></span>
+      </div></div><div class="lbl">好友</div></div>
+    </div>
+    <div class="vis"><div class="vicon"></div><div class="vnum">38</div><div class="vmax">/50</div></div>
+  </div>
+</div>
+
+<div class="spec">
+  <h1>经营页 · 设计说明</h1>
+
+  <h2>为什么这样排</h2>
+  <ul>
+    <li>列表顺序 = <b>客流到店顺序</b>（咖啡→花束→衣橱→甜屋→书店），玩家一眼看出"客人下一步去哪家"</li>
+    <li>顶部三个数：客流 / 今日收益 / 满铺加成状态——正好回答"我现在赚多少、为什么"</li>
+    <li><b>关店按钮已移除</b>（用户拍板）。营业中的店只显示状态，不给"只能变差"的操作</li>
+  </ul>
+
+  <h2>尺寸要点（@750）</h2>
+  <ul>
+    <li>概览卡 <code>706×112</code>，三格等分</li>
+    <li>店铺行 <code>706×146</code>，行距 <code>8px</code>，5 行共 762px</li>
+    <li>缩略图 <code>104×104</code>，圆角 9，描边 3px</li>
+    <li>「开业」按钮 <code>132×80</code>，触控区向下扩到 <code>≥88</code> 高</li>
+    <li>底部 HUD <code>160px</code> + 其上方 <code>53px</code> 禁放区</li>
+  </ul>
+
+  <h2>三通道状态编码</h2>
+  <ul>
+    <li><b>营业中</b>：绿色对勾圆形（形状）+ 文字「营业中」</li>
+    <li><b>待开业</b>：金色加号角标 + 「开业」按钮</li>
+    <li><b>未开放</b>：木牌锁形 + 文字「未开放」+ 缩略图去饱和（明度）</li>
+    <li>未开放行禁止变红——红=危险，违反"无失败态"红线</li>
+  </ul>
+
+  <h2>数值口径（本图示例，全套设计稿统一）</h2>
+  <ul>
+    <li>金币 <code>1012</code> / 今日客流 <code>38/50</code> / 今日收益 <code>+332</code></li>
+    <li>来自：初始 1280 − 解锁衣橱 600 = 680，加上今日 24×8 + 14×10 = 332</li>
+    <li>咖啡 Lv2：基础 <b>7</b> + 满铺 <b>1</b> = 单客 <b>8</b>；累计 24 客流 → 192 金币</li>
+    <li>花束 Lv1：基础 <b>9</b> + 满铺 <b>1</b> = 单客 <b>10</b>；累计 14 客流 → 140 金币</li>
+    <li>衣橱 Lv1：基础 <b>12</b>（二层未满铺，无加成）；尚未开业，累计 0</li>
+    <li>单客收益必须写明「基础 + 满铺」的构成，否则玩家看不懂数字为什么变了</li>
+  </ul>
+
+  <h2>待办依赖</h2>
+  <ul>
+    <li>缩略图为 CSS 近似示意，正式用 <code>shop_*_open</code> / <code>slt_*_empty</code></li>
+    <li>字体系统占位，正式为阿里巴巴普惠体</li>
+    <li>「今日收益」需要服务端提供当日累计增量字段（M02 需补）</li>
+  </ul>
+</div>
+
+</body>
+</html>

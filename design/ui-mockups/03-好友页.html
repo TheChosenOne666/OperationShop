@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>街角百货铺 · 好友页（排行榜 / 空态）</title>
+<style>
+:root{
+  --green-brand:#6E8269; --green-light:#93A282; --green-mid:#586B58; --green-deep:#3C4E3C;
+  --wood-pale:#E8C88A; --wood-light:#C89A6E; --wood-mid:#A8764E; --wood-base:#8F6049; --wood-dark:#6B4B3A; --wood-line:#4A2F1E;
+  --cream-bg:#E4D8C6; --cream-bright:#F2E8D8; --cream-warm:#D9BFA0;
+  --glow-window:#F2DDAE; --glow-core:#FFF0C8; --sun-tint:#E8A868;
+  --gold:#EFB021; --gold-light:#F7DC63; --gold-deep:#C88A10;
+  --blossom:#F2CB9E; --veil:#CFC6B8;
+  --font: "Alibaba PuHuiTi","AlibabaPuHuiTi","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:#453E37;padding:40px;display:flex;justify-content:center;align-items:flex-start;gap:36px;flex-wrap:wrap}
+.wrap{display:flex;flex-direction:column;gap:12px}
+.cap{color:#EDE6DC;font-size:14px;font-weight:700;padding-left:4px}
+.phone{width:750px;height:1334px;position:relative;overflow:hidden;background:var(--cream-bg);box-shadow:0 24px 60px rgba(0,0,0,.45);flex:none}
+.safe{position:absolute;top:0;left:0;width:100%;height:48px}
+
+.topbar{position:absolute;top:48px;left:0;width:100%;height:88px;display:flex;align-items:center;padding:0 22px;gap:16px}
+.back{width:64px;height:64px;border-radius:50%;background:linear-gradient(160deg,var(--wood-mid),var(--wood-base));
+  border:3px solid var(--wood-line);box-shadow:inset 0 3px 0 var(--wood-light),0 3px 0 rgba(74,47,30,.35);display:flex;align-items:center;justify-content:center;flex:none}
+.back i{width:20px;height:20px;border-left:6px solid var(--wood-pale);border-bottom:6px solid var(--wood-pale);transform:rotate(45deg);margin-left:6px;border-radius:2px}
+.title{font-size:34px;font-weight:900;color:var(--wood-line)}
+
+/* 我自己 */
+.me{position:absolute;top:150px;left:22px;width:706px;height:170px;border-radius:14px;
+  background:linear-gradient(180deg,var(--cream-bright),var(--cream-warm));border:4px solid var(--gold);
+  box-shadow:0 0 0 4px rgba(239,176,33,.28),inset 0 4px 0 #fffaf0;display:flex;align-items:center;gap:18px;padding:0 20px}
+.me .rk{width:88px;height:88px;border-radius:50%;background:radial-gradient(circle at 34% 30%,var(--gold-light),var(--gold) 55%,var(--gold-deep));
+  border:4px solid var(--wood-line);flex:none;display:flex;align-items:center;justify-content:center}
+.me .rk b{font-size:38px;font-weight:900;color:var(--wood-line)}
+.me .who{flex:1}
+.me .who .n{font-size:30px;font-weight:900;color:var(--wood-line)}
+.me .who .s{font-size:21px;font-weight:700;color:var(--wood-dark);margin-top:6px}
+.me .amt{display:flex;align-items:center;gap:10px}
+.cicon{width:48px;height:48px;border-radius:50%;background:radial-gradient(circle at 34% 30%,var(--gold-light),var(--gold) 52%,var(--gold-deep));
+  border:3px solid var(--wood-line);position:relative;flex:none}
+.cicon::after{content:"";position:absolute;left:14px;top:14px;width:16px;height:12px;border-top:4px solid var(--wood-line);border-bottom:4px solid var(--wood-line)}
+.amt b{font-size:38px;font-weight:900;color:var(--wood-line)}
+
+.hint{position:absolute;top:336px;left:22px;width:706px;height:40px;display:flex;align-items:center;gap:10px;
+  font-size:21px;font-weight:700;color:var(--wood-dark)}
+.hint .bar{width:8px;height:24px;border-radius:4px;background:var(--green-brand)}
+
+/* 榜单 */
+.list{position:absolute;top:390px;left:22px;width:706px;display:flex;flex-direction:column;gap:8px}
+.r{height:114px;border-radius:12px;border:3px solid var(--wood-line);background:var(--cream-bright);
+  box-shadow:inset 0 3px 0 #fffaf0;display:flex;align-items:center;gap:16px;padding:0 18px}
+.r .no{width:64px;height:64px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+  border:3px solid var(--wood-line);background:var(--cream-warm)}
+.r .no b{font-size:30px;font-weight:900;color:var(--wood-line)}
+/* 前三名：明度更高 + 圆牌更大（不新增颜色，不靠金银铜） */
+.r.top .no{width:72px;height:72px;background:linear-gradient(170deg,var(--wood-pale),var(--wood-light))}
+.r.top .no b{font-size:34px}
+.r .av{width:76px;height:76px;border-radius:50%;border:3px solid var(--wood-line);flex:none;position:relative;overflow:hidden;background:var(--cream-warm)}
+.r .av::after{content:"";position:absolute;left:50%;top:14px;width:26px;height:26px;margin-left:-13px;border-radius:50%;background:var(--wood-mid)}
+.r .av::before{content:"";position:absolute;left:50%;top:46px;width:52px;height:30px;margin-left:-26px;border-radius:20px 20px 0 0;background:var(--wood-mid)}
+.r .nm{flex:1;font-size:27px;font-weight:900;color:var(--wood-line)}
+.r .amt{display:flex;align-items:center;gap:9px}
+.r .amt b{font-size:30px;font-weight:900;color:var(--wood-base)}
+.mini{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 34% 30%,var(--gold-light),var(--gold) 52%,var(--gold-deep));
+  border:2px solid var(--wood-line);position:relative;flex:none}
+.mini::after{content:"";position:absolute;left:9px;top:9px;width:12px;height:9px;border-top:3px solid var(--wood-line);border-bottom:3px solid var(--wood-line)}
+
+/* 空态 */
+.empty{position:absolute;top:390px;left:22px;width:706px;height:520px;border-radius:16px;border:4px dashed var(--wood-light);
+  background:var(--cream-bright);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;padding:0 60px;text-align:center}
+.empty .ic{width:150px;height:150px;border-radius:50%;background:var(--cream-warm);border:4px solid var(--wood-line);position:relative;display:flex;align-items:center;justify-content:center}
+.empty .ic .p1{width:46px;height:46px;border-radius:50%;background:var(--wood-mid);position:absolute;top:34px}
+.empty .ic .p2{width:86px;height:48px;border-radius:34px 34px 0 0;background:var(--wood-mid);position:absolute;bottom:28px}
+.empty h3{font-size:30px;font-weight:900;color:var(--wood-line)}
+.empty p{font-size:24px;font-weight:700;color:var(--wood-dark);line-height:1.6}
+.empty .cta{margin-top:6px;height:92px;padding:0 44px;border-radius:14px;border:4px solid var(--wood-line);
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base));box-shadow:inset 0 3px 0 var(--wood-light),0 3px 0 rgba(74,47,30,.35);
+  display:flex;align-items:center}
+.empty .cta span{font-size:28px;font-weight:900;color:var(--cream-bright);
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+
+/* 底部说明条 */
+.note{position:absolute;left:22px;bottom:213px;width:706px;border-radius:12px;border:3px dashed var(--wood-light);
+  background:rgba(242,232,216,.7);padding:14px 18px;font-size:21px;font-weight:700;color:var(--wood-dark);line-height:1.55}
+
+/* HUD */
+.hud{position:absolute;bottom:0;left:0;width:750px;height:160px;
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base) 42%,var(--wood-dark));
+  border-top:5px solid var(--wood-line);box-shadow:inset 0 6px 0 var(--wood-light)}
+.hud::before{content:"";position:absolute;inset:0;opacity:.16;
+  background:repeating-linear-gradient(180deg,rgba(74,47,30,.5) 0 1px,transparent 1px 9px)}
+.nozone{position:absolute;bottom:160px;left:0;width:750px;height:53px;
+  background:repeating-linear-gradient(45deg,rgba(201,74,56,.10) 0 12px,transparent 12px 24px)}
+.hud .coin{position:absolute;left:30px;top:52px;display:flex;align-items:center;gap:12px}
+.cval{font-size:40px;font-weight:900;color:var(--cream-bright);
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.nav{position:absolute;left:50%;transform:translateX(-50%);top:20px;display:flex;gap:26px}
+.nb{width:96px;text-align:center}
+.nb .ring{width:96px;height:96px;border-radius:50%;background:linear-gradient(170deg,var(--wood-mid),var(--wood-base));
+  border:4px solid var(--wood-line);box-shadow:inset 0 4px 0 var(--wood-light);position:relative;margin:0 auto}
+.nb .lbl{font-size:22px;font-weight:900;color:var(--cream-bright);margin-top:4px;
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.nb.active .ring{transform:translateY(2px);filter:brightness(.88);box-shadow:inset 0 6px 10px rgba(0,0,0,.35)}
+.ic{position:absolute;inset:26px}
+.ic span{position:absolute;background:var(--wood-pale);border-radius:3px}
+.hud .vis{position:absolute;right:30px;top:56px;display:flex;align-items:center;gap:10px}
+.vicon{width:36px;height:36px;border-radius:50%;background:var(--cream-bright);border:3px solid var(--wood-line);position:relative;flex:none}
+.vicon::after{content:"";position:absolute;left:9px;top:7px;width:12px;height:12px;border-radius:50%;background:var(--wood-line)}
+.vnum{font-size:28px;font-weight:900;color:var(--cream-bright);text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.vmax{font-size:24px;font-weight:900;color:var(--cream-bright);opacity:.7;text-shadow:0 2px 0 var(--wood-line)}
+
+.spec{width:400px;color:#EDE6DC;font-size:13px;line-height:1.85}
+.spec h1{font-size:19px;margin-bottom:14px;color:#fff}
+.spec h2{font-size:14px;margin:16px 0 6px;color:var(--gold-light)}
+.spec ul{margin-left:16px}
+.spec code{background:rgba(255,255,255,.1);padding:1px 5px;border-radius:3px;font-size:12px}
+</style>
+</head>
+<body>
+
+<!-- ================= 状态 A：排行榜 ================= -->
+<div class="wrap">
+<div class="cap">状态 A · 已授权且好友 ≥1 人</div>
+<div class="phone">
+  <div class="safe"></div>
+  <div class="topbar"><div class="back"><i></i></div><div class="title">好友</div></div>
+
+  <div class="me">
+    <div class="rk"><b>3</b></div>
+    <div class="who">
+      <div class="n">我</div>
+      <div class="s">商场经营榜 · 总金币</div>
+    </div>
+    <div class="amt"><div class="cicon"></div><b>1012</b></div>
+  </div>
+
+  <div class="hint"><div class="bar"></div>好友排行榜（按总金币）</div>
+
+  <div class="list">
+    <div class="r top"><div class="no"><b>1</b></div><div class="av"></div><div class="nm">阿岚</div><div class="amt"><div class="mini"></div><b>2 480</b></div></div>
+    <div class="r top"><div class="no"><b>2</b></div><div class="av"></div><div class="nm">小满</div><div class="amt"><div class="mini"></div><b>1 620</b></div></div>
+    <div class="r top"><div class="no"><b>3</b></div><div class="av"></div><div class="nm">我</div><div class="amt"><div class="mini"></div><b>1012</b></div></div>
+    <div class="r"><div class="no"><b>4</b></div><div class="av"></div><div class="nm">陈叔</div><div class="amt"><div class="mini"></div><b>735</b></div></div>
+    <div class="r"><div class="no"><b>5</b></div><div class="av"></div><div class="nm">毛毛</div><div class="amt"><div class="mini"></div><b>520</b></div></div>
+  </div>
+
+  <div class="note">
+    名次取自微信好友关系与托管数据，只在你的设备上展示，<b>不读取也不修改好友的存档</b>。<br>
+    自己的金币每 5 分钟同步一次。
+  </div>
+
+  <div class="nozone"></div>
+  <div class="hud">
+    <div class="coin"><div class="cicon"></div><div class="cval">1012</div></div>
+    <div class="nav">
+      <div class="nb"><div class="ring"><div class="ic" style="inset:28px">
+        <span style="left:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="right:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="left:50%;bottom:0;width:34px;height:16px;margin-left:-17px;background:none;border:3px solid var(--wood-pale);border-radius:2px 2px 0 0"></span>
+      </div></div><div class="lbl">经营</div></div>
+      <div class="nb"><div class="ring"><div class="ic">
+        <span style="left:0;top:0;width:16px;height:16px"></span><span style="left:24px;top:0;width:16px;height:16px"></span><span style="right:0;top:0;width:16px;height:16px"></span>
+        <span style="left:0;top:24px;width:16px;height:16px"></span><span style="left:24px;top:24px;width:16px;height:16px"></span><span style="right:0;top:24px;width:16px;height:16px"></span>
+        <span style="left:0;bottom:0;width:16px;height:16px"></span><span style="left:24px;bottom:0;width:16px;height:16px"></span><span style="right:0;bottom:0;width:16px;height:16px"></span>
+      </div></div><div class="lbl">布局</div></div>
+      <div class="nb active"><div class="ring"><div class="ic">
+        <span style="left:50%;top:4px;width:20px;height:20px;margin-left:-10px;border-radius:50%"></span>
+        <span style="left:50%;bottom:2px;width:38px;height:20px;margin-left:-19px;border-radius:12px 12px 0 0"></span>
+      </div></div><div class="lbl">好友</div></div>
+    </div>
+    <div class="vis"><div class="vicon"></div><div class="vnum">38</div><div class="vmax">/50</div></div>
+  </div>
+</div>
+</div>
+
+<!-- ================= 状态 B：空态 ================= -->
+<div class="wrap">
+<div class="cap">状态 B · 无好友或未授权（需求 R-10：不得留空白页）</div>
+<div class="phone">
+  <div class="safe"></div>
+  <div class="topbar"><div class="back"><i></i></div><div class="title">好友</div></div>
+
+  <div class="empty">
+    <div class="ic"><div class="p1"></div><div class="p2"></div></div>
+    <h3>还没有好友在玩</h3>
+    <p>邀请一位好友，就能一起比谁的商场经营得更好。<br>你的金币已经记上了，随时可以来比。</p>
+    <div class="cta"><span>邀请好友</span></div>
+  </div>
+
+  <div class="note">
+    <b>空态也要给出自己的数据</b>：即便一个好友都没有，也要能看见"我现在 1012 金币"。<br>
+    若因未授权导致拿不到好友列表，文案改为「需要允许查看好友，才能显示排行榜」并给出授权入口。
+  </div>
+
+  <div class="nozone"></div>
+  <div class="hud">
+    <div class="coin"><div class="cicon"></div><div class="cval">1012</div></div>
+    <div class="nav">
+      <div class="nb"><div class="ring"><div class="ic" style="inset:28px">
+        <span style="left:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="right:0;top:0;width:16px;height:11px;background:none;border:3px solid var(--wood-pale);border-radius:2px"></span>
+        <span style="left:50%;bottom:0;width:34px;height:16px;margin-left:-17px;background:none;border:3px solid var(--wood-pale);border-radius:2px 2px 0 0"></span>
+      </div></div><div class="lbl">经营</div></div>
+      <div class="nb"><div class="ring"><div class="ic">
+        <span style="left:0;top:0;width:16px;height:16px"></span><span style="left:24px;top:0;width:16px;height:16px"></span><span style="right:0;top:0;width:16px;height:16px"></span>
+        <span style="left:0;top:24px;width:16px;height:16px"></span><span style="left:24px;top:24px;width:16px;height:16px"></span><span style="right:0;top:24px;width:16px;height:16px"></span>
+        <span style="left:0;bottom:0;width:16px;height:16px"></span><span style="left:24px;bottom:0;width:16px;height:16px"></span><span style="right:0;bottom:0;width:16px;height:16px"></span>
+      </div></div><div class="lbl">布局</div></div>
+      <div class="nb active"><div class="ring"><div class="ic">
+        <span style="left:50%;top:4px;width:20px;height:20px;margin-left:-10px;border-radius:50%"></span>
+        <span style="left:50%;bottom:2px;width:38px;height:20px;margin-left:-19px;border-radius:12px 12px 0 0"></span>
+      </div></div><div class="lbl">好友</div></div>
+    </div>
+    <div class="vis"><div class="vicon"></div><div class="vnum">38</div><div class="vmax">/50</div></div>
+  </div>
+</div>
+</div>
+
+<div class="spec">
+  <h1>好友页 · 设计说明</h1>
+
+  <h2>数据来源与红线</h2>
+  <ul>
+    <li>排行榜走<b>微信托管数据 + 开放数据域</b>：主域上报自己金币，子域读好友数据并渲染</li>
+    <li>只读，<b>不读取也不修改好友存档</b></li>
+    <li>自己上报的必须是<b>服务端权威金币</b>，不是客户端算的</li>
+  </ul>
+
+  <h2>名次编码（不新增金属色）</h2>
+  <ul>
+    <li>名次靠<b>数字</b>（文字通道），不靠颜色</li>
+    <li>前三名用<b>更亮的浅木圆牌 + 更大尺寸</b>（明度 + 尺寸通道）</li>
+    <li>刻意不用金/银/铜——银与铜不在美术圣经色板内，引入会破坏暖木色域</li>
+  </ul>
+
+  <h2>尺寸要点（@750）</h2>
+  <ul>
+    <li>「我」的卡片 <code>706×170</code>，金色描边区别于其他行</li>
+    <li>榜单行 <code>706×114</code>，行距 <code>8px</code></li>
+    <li>头像 <code>76×76</code>；名次圆牌 <code>64</code>，前三名 <code>72</code></li>
+    <li>触控区「邀请好友」按钮高度 <code>92px</code>（≥88）</li>
+  </ul>
+
+  <h2>待办依赖</h2>
+  <ul>
+    <li>头像/昵称来自微信，需用户授权；<b>授权入口与限制必须核对官方最新文档</b>（本图未假定具体接口）</li>
+    <li>若授权失败或平台限制，降级为"只显示自己"（状态 B 的文案分支）</li>
+    <li>「自己的金币每 5 分钟同步」为示例口径，实际上报频率需按平台配额定</li>
+  </ul>
+</div>
+
+</body>
+</html>

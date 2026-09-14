@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>街角百货铺 · 解锁确认弹窗</title>
+<style>
+:root{
+  --green-brand:#6E8269; --green-light:#93A282; --green-deep:#3C4E3C;
+  --wood-pale:#E8C88A; --wood-light:#C89A6E; --wood-mid:#A8764E; --wood-base:#8F6049; --wood-dark:#6B4B3A; --wood-line:#4A2F1E;
+  --cream-bg:#E4D8C6; --cream-bright:#F2E8D8; --cream-warm:#D9BFA0;
+  --glow-window:#F2DDAE; --glow-core:#FFF0C8; --sun-tint:#E8A868;
+  --gold:#EFB021; --gold-light:#F7DC63; --gold-deep:#C88A10;
+  --veil:#CFC6B8;
+  --font: "Alibaba PuHuiTi","AlibabaPuHuiTi","Source Han Sans SC","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:#453E37;padding:40px;display:flex;justify-content:center;align-items:flex-start;gap:36px;flex-wrap:wrap}
+.phone{width:750px;height:1334px;position:relative;overflow:hidden;background:var(--cream-bg);box-shadow:0 24px 60px rgba(0,0,0,.45);flex:none}
+.bgpage{position:absolute;inset:0;padding:48px 22px 0}
+.bgpage .ph{height:88px;display:flex;align-items:center}
+.bgpage .ph .t{font-size:34px;font-weight:900;color:var(--wood-line)}
+.bgpage .grp{height:46px;display:flex;align-items:center;font-size:26px;font-weight:900;color:var(--wood-line);margin-top:16px}
+.bgpage .slots{display:flex;gap:11px;margin-top:6px}
+.bgpage .s{flex:1;height:296px;border-radius:10px;border:3px solid var(--wood-line);background:var(--cream-bright)}
+.scrim{position:absolute;inset:0;background:rgba(74,47,30,.58)}
+
+.panel{position:absolute;left:60px;top:230px;width:630px;border-radius:22px;
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base) 46%,var(--wood-dark));
+  border:6px solid var(--wood-line);box-shadow:inset 0 6px 0 var(--wood-light),inset 0 -8px 0 rgba(0,0,0,.18),0 18px 40px rgba(0,0,0,.45);
+  padding:26px}
+.panel::before{content:"";position:absolute;inset:10px;border-radius:14px;opacity:.16;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(74,47,30,.55) 0 1px,transparent 1px 10px)}
+.close{position:absolute;top:-18px;right:-18px;width:64px;height:64px;border-radius:50%;
+  background:linear-gradient(160deg,var(--wood-mid),var(--wood-base));border:4px solid var(--wood-line);
+  box-shadow:inset 0 3px 0 var(--wood-light);display:flex;align-items:center;justify-content:center}
+.close::before{content:"";position:absolute;width:8px;height:30px;background:var(--wood-pale);border-radius:3px;transform:rotate(45deg)}
+.close::after{content:"";position:absolute;width:8px;height:30px;background:var(--wood-pale);border-radius:3px;transform:rotate(-45deg)}
+
+.inner{position:relative;background:var(--cream-bright);border:4px solid var(--wood-line);border-radius:14px;padding:22px}
+h2{font-size:34px;font-weight:900;color:var(--wood-line);text-align:center}
+.sub{font-size:23px;font-weight:700;color:var(--wood-dark);text-align:center;margin-top:8px}
+
+/* 解锁前后对照 */
+.pair{display:flex;align-items:flex-start;gap:16px;margin:20px 0 6px}
+.pair>div{flex:1;min-width:0}
+.slotbox{flex:1;height:180px;border-radius:10px;border:4px solid var(--wood-line);overflow:hidden;position:relative;background:var(--cream-bg)}
+.awning{position:absolute;left:-4%;top:0;width:108%;height:34px;background:var(--green-brand);border-radius:4px 4px 0 0}
+.awning::after{content:"";position:absolute;left:0;top:100%;width:100%;height:9px;
+  background:radial-gradient(circle at 7px 0,var(--green-brand) 6px,transparent 6.6px) repeat-x;background-size:14px 9px}
+.win{position:absolute;left:13%;top:52px;width:74%;height:70px;border:3px solid var(--wood-line);border-radius:4px;
+  background:linear-gradient(180deg,var(--glow-core),var(--glow-window) 58%,var(--sun-tint));overflow:hidden}
+.win::after{content:"";position:absolute;left:15%;top:-14%;width:15%;height:128%;background:rgba(255,255,255,.16);transform:rotate(19deg)}
+.slotbox.locked .awning{background:var(--veil)}
+.slotbox.locked .win{background:var(--cream-warm)}
+.slotbox.locked .veil{position:absolute;inset:0;background:var(--veil);opacity:.35}
+.tagline{font-size:21px;font-weight:900;text-align:center;margin-top:8px;color:var(--wood-base)}
+.tagline.after{color:var(--green-deep)}
+.lockchip{position:absolute;top:10px;right:10px;width:44px;height:44px;border-radius:10px;background:var(--veil);
+  border:3px solid var(--wood-line);display:flex;align-items:center;justify-content:center}
+.lockchip::before{content:"";width:15px;height:13px;background:var(--wood-line);border-radius:2px;margin-top:7px}
+.lockchip::after{content:"";position:absolute;top:8px;width:13px;height:11px;border:4px solid var(--wood-line);border-bottom:0;border-radius:7px 7px 0 0}
+.arrow{width:0;height:0;border-left:16px solid var(--wood-dark);border-top:11px solid transparent;border-bottom:11px solid transparent;flex:none}
+
+/* 金币结算 */
+.money{background:var(--cream-warm);border:3px solid var(--wood-line);border-radius:10px;padding:14px 16px;margin-top:14px}
+.mrow{display:flex;justify-content:space-between;align-items:baseline;font-size:25px;font-weight:700;color:var(--wood-dark);padding:5px 0}
+.mrow b{font-size:28px;font-weight:900;color:var(--wood-line)}
+.mrow .neg{color:var(--gold-deep)}
+.mrow .left{color:var(--green-deep)}
+
+/* 解锁后的变化 */
+.chg{margin-top:14px}
+.chg h3{font-size:23px;font-weight:900;color:var(--wood-line);margin-bottom:8px}
+.chg li{list-style:none;display:flex;gap:10px;font-size:23px;font-weight:700;color:var(--wood-dark);line-height:1.55;padding:3px 0}
+.chg li i{width:22px;height:22px;border-radius:50%;background:var(--green-brand);border:3px solid var(--wood-line);
+  flex:none;margin-top:5px;position:relative}
+.chg li i::after{content:"";position:absolute;left:5px;top:6px;width:9px;height:5px;border-left:3px solid var(--cream-bright);border-bottom:3px solid var(--cream-bright);transform:rotate(-45deg)}
+
+.btns{display:flex;gap:14px;margin-top:20px}
+.btn{flex:1;height:104px;border-radius:14px;border:4px solid var(--wood-line);display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(180deg,var(--wood-mid),var(--wood-base));box-shadow:inset 0 4px 0 var(--wood-light),0 4px 0 rgba(74,47,30,.4)}
+.btn span{font-size:30px;font-weight:900;color:var(--cream-bright);
+  text-shadow:0 2px 0 var(--wood-line),2px 0 0 var(--wood-line),-2px 0 0 var(--wood-line),0 -2px 0 var(--wood-line)}
+.btn.primary{background:linear-gradient(180deg,var(--wood-light),var(--wood-mid));
+  box-shadow:inset 0 4px 0 #E8C88A,0 0 0 5px rgba(239,176,33,.35),0 0 30px rgba(239,176,33,.45),0 4px 0 rgba(74,47,30,.4)}
+/* 次要按钮：靠"更暗、无金晕"表达次级，不靠降低文字对比度
+   （原方案 cream-warm on wood = 2.5:1，低于 §9.2 的 4.5:1 下限，已修正） */
+.btn.ghost{background:linear-gradient(180deg,var(--wood-base),var(--wood-dark))}
+.btn.ghost span{color:var(--cream-bright);opacity:.92}
+
+.spec{width:400px;color:#EDE6DC;font-size:13px;line-height:1.85}
+.spec h1{font-size:19px;margin-bottom:14px;color:#fff}
+.spec h2{font-size:14px;margin:16px 0 6px;color:var(--gold-light)}
+.spec ul{margin-left:16px}
+.spec code{background:rgba(255,255,255,.1);padding:1px 5px;border-radius:3px;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="phone">
+  <div class="bgpage">
+    <div class="ph"><div class="t">布局</div></div>
+    <div class="grp">二层 · 楼面</div>
+    <div class="slots"><div class="s"></div><div class="s"></div><div class="s"></div></div>
+    <div class="grp">一层 · 临街</div>
+    <div class="slots"><div class="s" style="height:250px"></div><div class="s" style="height:250px"></div></div>
+  </div>
+  <div class="scrim"></div>
+
+  <div class="panel">
+    <div class="close"></div>
+    <div class="inner">
+      <h2>解锁铺位</h2>
+      <div class="sub">二层 · 2 号铺位「甜屋」</div>
+
+      <div class="pair">
+        <div>
+          <div class="slotbox locked">
+            <div class="awning"></div><div class="win"></div><div class="veil"></div>
+            <div class="lockchip"></div>
+          </div>
+          <div class="tagline">未开放</div>
+        </div>
+        <div class="arrow"></div>
+        <div>
+          <div class="slotbox">
+            <div class="awning"></div><div class="win"></div>
+          </div>
+          <div class="tagline after">可开业</div>
+        </div>
+      </div>
+
+      <div class="money">
+        <div class="mrow"><span>解锁花费</span><b class="neg">− 800 金币</b></div>
+        <div class="mrow"><span>现有金币</span><b>1012</b></div>
+        <div class="mrow"><span>解锁后余额</span><b class="left">212 金币</b></div>
+      </div>
+
+      <div class="chg">
+        <h3>解锁后会怎样</h3>
+        <ul>
+          <li><i></i>「甜屋」变成可开业，可在经营页开店营业</li>
+          <li><i></i>二层进度变成 2 / 3，还差 1 个铺位</li>
+          <li><i></i>二层满铺后，该层单客收益 +1（一层已生效）</li>
+        </ul>
+      </div>
+
+      <div class="btns">
+        <div class="btn ghost"><span>再想想</span></div>
+        <div class="btn primary"><span>确认解锁</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="spec">
+  <h1>解锁确认弹窗 · 设计说明</h1>
+
+  <h2>为什么需要二次确认</h2>
+  <ul>
+    <li>这是游戏里<b>最大额的不可逆支出</b>（800–1200 金币，相当于开局 1–2 天产出）</li>
+    <li>需求 R-02 要求"金币不足时不能解锁<b>并给出原因</b>"——原因写在布局页的按钮上，不在这里</li>
+    <li>弹窗必须把<b>解锁后的变化</b>说清楚，否则玩家只知道"花了钱"</li>
+  </ul>
+
+  <h2>结构</h2>
+  <ul>
+    <li><b>前 → 后对照</b>：左「未开放」（纱罩 + 锁角标 + 暗）→ 右「可开业」（暖光亮起）<br>
+        刻意用同一张空铺底图，只靠<b>自发光 + 纱罩</b>区分，让"灯亮起来"成为解锁的视觉回报</li>
+    <li><b>金币结算三行</b>：花费 / 现有 / 余额。余额用绿色写"212 金币"——把结果先算给玩家看</li>
+    <li><b>解锁后变化清单</b>：含"还差 1 个铺位就能拿到二层满铺 +1"，把下一步动作讲明白</li>
+  </ul>
+
+  <h2>尺寸要点（@750）</h2>
+  <ul>
+    <li>面板 <code>630</code> 宽；内嵌奶白板（木底压不住正文对比度）</li>
+    <li>对照缩略 <code>~275×180</code>，中间箭头 16px</li>
+    <li>标题 34 / 正文 25–26 / 辅助 21（§8.4）</li>
+    <li>按钮高 <code>104</code>；两个按钮等分宽</li>
+  </ul>
+
+  <h2>待办依赖</h2>
+  <ul>
+    <li>「解锁后余额」需服务端在解锁接口的返回里给出，客户端不自己算（服务端权威红线）</li>
+    <li>解锁接口 <code>POST /api/v1/slots/{slotId}/unlock</code> 属 M02，尚未实现</li>
+  </ul>
+</div>
+
+</body>
+</html>
