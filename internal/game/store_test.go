@@ -26,42 +26,48 @@ func TestFileStoreRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "local-development.json")
 	store := FileStore{Path: path}
 	clock := &testClock{stamp: testTime()}
-	service, err := NewService(testConfig(t), store, clock.now)
+	cfg := fundedTestConfig(t)
+	service, err := NewService(cfg, store, clock.now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertTestStoredState(t, store, service.Snapshot())
+	assertTestStoredState(t, store, service.snapshotState())
 	prepareTestShops(t, service)
+	beforeSettle := service.snapshotState()
 	clock.set(testTime().Add(12 * time.Second))
-	assertTestResult(t, settleTestService(t, service), 20, 2, true)
-	before := service.Snapshot()
+	coins, _ := testRotation(t, cfg, beforeSettle, 0, 2)
+	assertTestResult(t, settleTestService(t, service), coins, 2, true)
+	before := service.snapshotState()
 	original, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock.set(testTime().Add(25 * time.Second))
 	restartedStore := FileStore{Path: path}
-	restarted, err := NewService(testConfig(t), restartedStore, clock.now)
+	restarted, err := NewService(cfg, restartedStore, clock.now)
 	if err != nil {
 		t.Fatalf("从真实文件重启失败：%v", err)
 	}
-	assertTestState(t, restarted.Snapshot(), before)
+	assertTestState(t, restarted.snapshotState(), before)
 	unchanged, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(original, unchanged) {
 		t.Fatalf("重启加载不能改写存档：%v", err)
 	}
 	result := settleTestService(t, restarted)
-	assertTestResult(t, result, 25, 3, true)
-	if result.State.Coins != 1325 || result.State.VisitorsRemaining != 45 || result.State.NextShopIndex != 0 {
+	moreCoins, _ := testRotation(t, cfg, before, before.NextShopIndex, 3)
+	assertTestResult(t, result, moreCoins, 3, true)
+	if result.State.Coins != before.Coins+moreCoins || result.State.Spent != before.Spent ||
+		result.State.VisitorsRemaining != before.VisitorsRemaining-3 {
 		t.Fatalf("重启后不能重复计算已结算收益：%+v", result.State)
 	}
-	assertTestStoredState(t, restartedStore, result.State)
-	reloaded, err := NewService(testConfig(t), FileStore{Path: path}, clock.now)
+	assertTestStoredState(t, restartedStore, restarted.snapshotState())
+	reloaded, err := NewService(cfg, FileStore{Path: path}, clock.now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertTestState(t, reloaded.Snapshot(), result.State)
+	assertTestState(t, reloaded.snapshotState(), restarted.snapshotState())
 	assertTestResult(t, settleTestService(t, reloaded), 0, 0, false)
+	assertTestLedger(t, cfg, reloaded.snapshotState())
 	assertTestDirectoryEntries(t, filepath.Dir(path), filepath.Base(path))
 }
 
@@ -82,7 +88,7 @@ func TestFileStoreMissingSave(t *testing.T) {
 // TestFileStoreCorruptionIsNotOverwritten 验证损坏或无效存档拒绝启动且字节不变。
 func TestFileStoreCorruptionIsNotOverwritten(t *testing.T) {
 	service, _, _ := newTestService(t)
-	state := service.Snapshot()
+	state := service.snapshotState()
 	valid := string(testJSON(t, state))
 	badAccounting := copyTestState(state)
 	badAccounting.Coins++
@@ -90,6 +96,13 @@ func TestFileStoreCorruptionIsNotOverwritten(t *testing.T) {
 	badSchema.SchemaVersion++
 	badRules := copyTestState(state)
 	badRules.RulesFingerprint = "old-rules"
+	badSlot := copyTestState(state)
+	badSlot.UnlockedSlots = append(badSlot.UnlockedSlots, "f2-s9")
+	badCap := copyTestState(state)
+	badCap.CapFrozen = true
+	badLedger := copyTestState(state)
+	badLedger.Shops[0].Prepared = true
+	badLedger.Shops[0].Segments = []Segment{{UnitPrice: 6, Visitors: 1}}
 	cases := []struct {
 		name      string
 		body      string
@@ -108,6 +121,9 @@ func TestFileStoreCorruptionIsNotOverwritten(t *testing.T) {
 		{"null存档", "null", false},
 		{"缺失字段", "{}", false},
 		{"累计账目损坏", string(testJSON(t, badAccounting)), false},
+		{"未知铺位", string(testJSON(t, badSlot)), false},
+		{"客流上限二态损坏", string(testJSON(t, badCap)), false},
+		{"分段账目损坏", string(testJSON(t, badLedger)), false},
 		{"旧版本存档", string(testJSON(t, badSchema)), false},
 		{"规则不兼容", string(testJSON(t, badRules)), false},
 	}
@@ -138,7 +154,7 @@ func TestFileStoreCorruptionIsNotOverwritten(t *testing.T) {
 // TestFileStoreSaveFailurePreservesOriginal 验证编码失败不覆盖旧存档且清理临时文件。
 func TestFileStoreSaveFailurePreservesOriginal(t *testing.T) {
 	service, _, _ := newTestService(t)
-	state := service.Snapshot()
+	state := service.snapshotState()
 	path := filepath.Join(t.TempDir(), "save.json")
 	store := FileStore{Path: path}
 	before := copyTestState(state)
@@ -168,7 +184,7 @@ func TestFileStoreSaveFailurePreservesOriginal(t *testing.T) {
 // TestFileStoreInvalidPaths 验证路径错误返回失败且不损坏已有文件或目录。
 func TestFileStoreInvalidPaths(t *testing.T) {
 	service, _, _ := newTestService(t)
-	state := service.Snapshot()
+	state := service.snapshotState()
 	t.Run("空路径", func(t *testing.T) {
 		if err := (FileStore{}).Save(state); err == nil {
 			t.Fatal("空路径必须拒绝保存")

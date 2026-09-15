@@ -116,7 +116,13 @@ func (s *stubStore) seed(t *testing.T, mutate func(*game.State)) {
 }
 
 func copyState(state game.State) game.State {
-	state.Shops = append([]game.ShopState(nil), state.Shops...)
+	state.UnlockedSlots = append([]string(nil), state.UnlockedSlots...)
+	shops := state.Shops
+	state.Shops = make([]game.ShopState, len(shops))
+	for i, shop := range shops {
+		shop.Segments = append([]game.Segment(nil), shop.Segments...)
+		state.Shops[i] = shop
+	}
 	return state
 }
 
@@ -147,6 +153,14 @@ func loadTestConfig(t *testing.T) game.Config {
 	return cfg
 }
 
+// fundedConfig 只调高初始金币，便于在接口层走完解锁与升级路径。
+func fundedConfig(t *testing.T) game.Config {
+	t.Helper()
+	cfg := loadTestConfig(t)
+	cfg.InitialCoins = 100_000
+	return cfg
+}
+
 func newTestService(t *testing.T) *game.Service {
 	t.Helper()
 	clock := &stubClock{stamp: testTime()}
@@ -173,8 +187,13 @@ type testAPI struct {
 
 func newTestAPIWith(t *testing.T, token string, origins []string) *testAPI {
 	t.Helper()
+	return newTestAPIWithConfig(t, token, origins, loadTestConfig(t))
+}
+
+func newTestAPIWithConfig(t *testing.T, token string, origins []string, cfg game.Config) *testAPI {
+	t.Helper()
 	a := &testAPI{
-		t: t, token: token, origins: append([]string(nil), origins...), config: loadTestConfig(t),
+		t: t, token: token, origins: append([]string(nil), origins...), config: cfg,
 		store: &stubStore{}, clock: &stubClock{stamp: testTime()}, logs: &syncBuffer{},
 	}
 	a.logger = slog.New(slog.NewJSONHandler(a.logs, nil))
@@ -185,6 +204,12 @@ func newTestAPIWith(t *testing.T, token string, origins []string) *testAPI {
 func newTestAPI(t *testing.T) *testAPI {
 	t.Helper()
 	return newTestAPIWith(t, testDevToken, []string{testOrigin})
+}
+
+// newFundedTestAPI 使用金币充足的配置，便于走完解锁与升级路径。
+func newFundedTestAPI(t *testing.T) *testAPI {
+	t.Helper()
+	return newTestAPIWithConfig(t, testDevToken, []string{testOrigin}, fundedConfig(t))
 }
 
 // start 使用当前存档与时钟重建服务与处理器，用于模拟进程重启。
@@ -369,7 +394,9 @@ func TestAuthenticationRequired(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/config", ""},
 		{http.MethodGet, "/api/v1/mall", ""},
-		{http.MethodPost, "/api/v1/shops/clothing/prepare", "{}"},
+		{http.MethodPost, "/api/v1/shops/coffee/prepare", "{}"},
+		{http.MethodPost, "/api/v1/shops/coffee/upgrade", "{}"},
+		{http.MethodPost, "/api/v1/slots/f2-s1/unlock", "{}"},
 		{http.MethodPost, "/api/v1/mall/settle", "{}"},
 	}
 	headers := []struct {
@@ -395,7 +422,10 @@ func TestAuthenticationRequired(t *testing.T) {
 					t.Fatalf("%s 被拒绝的请求不得写入存档", header.name)
 				}
 			}
-			assertStatus(t, a.call(endpoint.method, endpoint.target, endpoint.body), http.StatusOK)
+			// 携带合法令牌时不得再被认证拦下（业务结果可能是 409 等状态冲突）。
+			if recorder := a.call(endpoint.method, endpoint.target, endpoint.body); recorder.Code == http.StatusUnauthorized {
+				t.Fatalf("合法令牌不应被认证拦下：%d", recorder.Code)
+			}
 		})
 	}
 }
@@ -450,7 +480,7 @@ func TestOriginPolicy(t *testing.T) {
 	}
 }
 
-// TestReadRoutes 验证配置与商城快照接口返回服务端权威数据。
+// TestReadRoutes 验证配置与商城快照接口返回服务端权威数据与派生字段。
 func TestReadRoutes(t *testing.T) {
 	a := newTestAPI(t)
 	recorder := a.call(http.MethodGet, "/api/v1/config", "")
@@ -461,43 +491,119 @@ func TestReadRoutes(t *testing.T) {
 	}
 	recorder = a.call(http.MethodGet, "/api/v1/mall", "")
 	assertStatus(t, recorder, http.StatusOK)
-	if got := decodeBody[game.State](t, recorder); !reflect.DeepEqual(got, a.service.Snapshot()) {
-		t.Fatalf("快照响应与服务端状态不一致：%+v", got)
+	view := decodeBody[game.MallView](t, recorder)
+	if !reflect.DeepEqual(view, a.service.Snapshot()) {
+		t.Fatalf("快照响应与服务端状态不一致：%+v", view)
+	}
+	// 未冻结的当天：接口必须返回 null 上限，客户端永远看不到占位 0。
+	if view.CapFrozen || view.DailyVisitorCap != nil || view.VisitorsServed != 0 {
+		t.Fatalf("未冻结时 dailyVisitorCap 必须为 null：%+v", view)
+	}
+	if view.NextSlotID == nil || view.NextUnlockCost == nil {
+		t.Fatalf("必须给出下一可解锁铺位：%+v", view)
+	}
+	for i, shop := range view.Shops {
+		if shop.Level != 1 || shop.UpgradeCost == nil || *shop.UpgradeCost != a.config.UpgradeCosts[0] {
+			t.Fatalf("店铺视图字段错误：%+v", shop)
+		}
+		if shop.UnitPrice != a.config.Shops[i].LevelCoinsPerVisitor[0] {
+			t.Fatalf("未满铺时单价应为等级单价：%+v", shop)
+		}
 	}
 }
 
 // TestPrepareAndSettleRoutes 验证命令路由的幂等、结算与未知店铺处理。
 func TestPrepareAndSettleRoutes(t *testing.T) {
 	a := newTestAPI(t)
-	recorder := a.call(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}")
+	recorder := a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}")
 	assertStatus(t, recorder, http.StatusOK)
 	prepared := decodeBody[game.Result](t, recorder)
 	if !prepared.Changed || prepared.State.Revision != 2 || !prepared.State.Shops[0].Prepared {
 		t.Fatalf("首次准备结果不符：%+v", prepared)
 	}
-	recorder = a.call(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}")
+	if prepared.State.CapFrozen || prepared.State.DailyVisitorCap != nil {
+		t.Fatalf("开店本身不得冻结客流上限：%+v", prepared.State)
+	}
+	recorder = a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}")
 	assertStatus(t, recorder, http.StatusOK)
 	repeated := decodeBody[game.Result](t, recorder)
 	if repeated.Changed || !reflect.DeepEqual(repeated.State, prepared.State) || a.store.saveCount() != 2 {
 		t.Fatalf("重复准备必须无副作用：%+v，保存 %d 次", repeated, a.store.saveCount())
 	}
+	price := a.config.Shops[0].LevelCoinsPerVisitor[0]
 	a.clock.set(testTime().Add(5 * time.Second))
 	recorder = a.call(http.MethodPost, "/api/v1/mall/settle", "{}")
 	assertStatus(t, recorder, http.StatusOK)
 	settled := decodeBody[game.Result](t, recorder)
-	if !settled.Changed || settled.EarnedCoins != 12 || settled.VisitorsUsed != 1 ||
-		settled.State.Coins != 1292 || settled.State.VisitorsRemaining != 49 {
+	if !settled.Changed || settled.EarnedCoins != price || settled.VisitorsUsed != 1 {
 		t.Fatalf("结算结果不符：%+v", settled)
+	}
+	if settled.State.DailyVisitorCap == nil || *settled.State.DailyVisitorCap != a.config.BaseVisitors+a.config.VisitorsPerShop ||
+		settled.State.VisitorsServed != 1 || settled.State.VisitorsRemaining != *settled.State.DailyVisitorCap-1 {
+		t.Fatalf("首次产生客人后必须冻结上限并给出已到店数：%+v", settled.State)
 	}
 	before := a.service.Snapshot()
 	saves := a.store.saveCount()
 	recorder = a.call(http.MethodPost, "/api/v1/shops/unknown/prepare", "{}")
 	assertErrorCode(t, recorder, http.StatusNotFound, "SHOP_NOT_FOUND")
-	recorder = a.call(http.MethodPost, "/api/v1/shops/Clothing/prepare", "{}")
+	recorder = a.call(http.MethodPost, "/api/v1/shops/Coffee/prepare", "{}")
 	assertErrorCode(t, recorder, http.StatusNotFound, "SHOP_NOT_FOUND")
 	if !reflect.DeepEqual(a.service.Snapshot(), before) || a.store.saveCount() != saves {
 		t.Fatal("未知店铺请求不得触发结算或保存")
 	}
+}
+
+// TestUnlockAndUpgradeRoutes 验证解锁铺位与升级店铺两条新命令路由。
+func TestUnlockAndUpgradeRoutes(t *testing.T) {
+	a := newFundedTestAPI(t)
+	slot := a.config.Slots[2] // 第一个二层铺位
+	shopIndex := 2
+	recorder := a.call(http.MethodPost, "/api/v1/slots/"+slot.ID+"/unlock", "{}")
+	assertStatus(t, recorder, http.StatusOK)
+	unlocked := decodeBody[game.Result](t, recorder)
+	if !unlocked.Changed || unlocked.State.Coins != a.config.InitialCoins-slot.UnlockCost || unlocked.State.Spent != slot.UnlockCost {
+		t.Fatalf("解锁结果不符：%+v", unlocked)
+	}
+	if !contains(unlocked.State.UnlockedSlots, slot.ID) {
+		t.Fatalf("解锁后必须出现在 unlockedSlots 中：%v", unlocked.State.UnlockedSlots)
+	}
+	// 重复解锁：幂等成功、不写存档。
+	saves := a.store.saveCount()
+	recorder = a.call(http.MethodPost, "/api/v1/slots/"+slot.ID+"/unlock", "{}")
+	assertStatus(t, recorder, http.StatusOK)
+	repeated := decodeBody[game.Result](t, recorder)
+	if repeated.Changed || a.store.saveCount() != saves {
+		t.Fatalf("重复解锁必须幂等且不写存档：%+v", repeated)
+	}
+	// 解锁后开店，再升级。
+	assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/"+slot.ShopID+"/prepare", "{}"), http.StatusOK)
+	recorder = a.call(http.MethodPost, "/api/v1/shops/"+slot.ShopID+"/upgrade", "{}")
+	assertStatus(t, recorder, http.StatusOK)
+	upgraded := decodeBody[game.Result](t, recorder)
+	if upgraded.State.Shops[shopIndex].Level != 2 || upgraded.State.Spent != slot.UnlockCost+a.config.UpgradeCosts[0] {
+		t.Fatalf("升级结果不符：%+v", upgraded.State.Shops[shopIndex])
+	}
+	if upgraded.State.Shops[shopIndex].UpgradeCost == nil || *upgraded.State.Shops[shopIndex].UpgradeCost != a.config.UpgradeCosts[1] {
+		t.Fatalf("升级后必须给出下一级成本：%+v", upgraded.State.Shops[shopIndex])
+	}
+	// 两套 ID 不得混用：slotId 传给升级接口、shopId 传给解锁接口都必须是未知目标。
+	before, saves := a.service.Snapshot(), a.store.saveCount()
+	recorder = a.call(http.MethodPost, "/api/v1/shops/"+slot.ID+"/upgrade", "{}")
+	assertErrorCode(t, recorder, http.StatusNotFound, "SHOP_NOT_FOUND")
+	recorder = a.call(http.MethodPost, "/api/v1/slots/"+slot.ShopID+"/unlock", "{}")
+	assertErrorCode(t, recorder, http.StatusNotFound, "SHOP_NOT_FOUND")
+	if !reflect.DeepEqual(a.service.Snapshot(), before) || a.store.saveCount() != saves {
+		t.Fatal("混用 ID 的请求不得改变状态")
+	}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCommandBodyValidation 验证命令请求体类型、形态与大小限制。
@@ -540,6 +646,40 @@ func TestCommandBodyValidation(t *testing.T) {
 	if a.store.saveCount() != 1 {
 		t.Fatalf("非法请求体不得写入存档，实际保存 %d 次", a.store.saveCount())
 	}
+	// 所有命令路由共用同一套请求体校验，新增的两条命令不得例外。
+	for _, route := range []string{"/api/v1/shops/coffee/prepare", "/api/v1/shops/coffee/upgrade", "/api/v1/slots/f1-s1/unlock"} {
+		recorder := a.call(http.MethodPost, route, `{"coins":5}`)
+		assertErrorCode(t, recorder, http.StatusBadRequest, "INVALID_COMMAND")
+		recorder = a.call(http.MethodPost, route, "{}", func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") })
+		assertErrorCode(t, recorder, http.StatusUnsupportedMediaType, "JSON_REQUIRED")
+	}
+	if a.store.saveCount() != 1 {
+		t.Fatalf("非法请求体不得写入存档，实际保存 %d 次", a.store.saveCount())
+	}
+}
+
+// brokenWriter 让响应写入失败，用于覆盖响应编码与写出的兜底分支。
+type brokenWriter struct{ header http.Header }
+
+func (w *brokenWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *brokenWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func (w *brokenWriter) WriteHeader(int) {}
+
+// TestWriteJSONFallbacks 验证无法编码或无法写出时的兜底行为。
+func TestWriteJSONFallbacks(t *testing.T) {
+	// 无法编码：返回 500 且不写出任何 JSON 正文。
+	recorder := httptest.NewRecorder()
+	writeJSON(recorder, http.StatusOK, make(chan int))
+	assertStatus(t, recorder, http.StatusInternalServerError)
+	// 无法写出：不 panic，也不影响后续请求。
+	writeJSON(&brokenWriter{}, http.StatusOK, game.Result{})
 }
 
 // TestErrorMapping 验证领域错误到稳定 HTTP 错误码的映射。
@@ -560,7 +700,7 @@ func TestErrorMapping(t *testing.T) {
 		a := newTestAPI(t)
 		a.clock.set(testTime().Add(5 * time.Second))
 		a.store.failSave(errors.New("注入存档写入失败"))
-		recorder := a.call(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}")
+		recorder := a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}")
 		assertErrorCode(t, recorder, http.StatusInternalServerError, "SAVE_FAILED")
 		if strings.Contains(recorder.Body.String(), "注入存档写入失败") {
 			t.Fatal("内部错误细节不得返回客户端")
@@ -572,15 +712,59 @@ func TestErrorMapping(t *testing.T) {
 			t.Fatal("保存失败不得发布部分结果")
 		}
 		a.store.failSave(nil)
-		assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}"), http.StatusOK)
+		assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}"), http.StatusOK)
 	})
 	t.Run("数值上限", func(t *testing.T) {
 		a := newTestAPI(t)
 		a.store.seed(t, func(state *game.State) { state.Revision = testMaxSafeInteger })
 		a.start()
 		a.clock.set(testTime().Add(time.Second))
-		recorder := a.call(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}")
+		recorder := a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}")
 		assertErrorCode(t, recorder, http.StatusConflict, "NUMERIC_LIMIT")
+	})
+	t.Run("解锁与升级错误码", func(t *testing.T) {
+		a := newFundedTestAPI(t)
+		slots := a.config.Slots
+		cases := []struct {
+			name   string
+			target string
+			status int
+			code   string
+		}{
+			{"跳序解锁", "/api/v1/slots/" + slots[3].ID + "/unlock", http.StatusConflict, "SLOT_ORDER"},
+			{"未知铺位", "/api/v1/slots/f3-s1/unlock", http.StatusNotFound, "SHOP_NOT_FOUND"},
+			{"未解锁铺位开店", "/api/v1/shops/" + slots[2].ShopID + "/prepare", http.StatusConflict, "SLOT_LOCKED"},
+			{"未解锁铺位升级", "/api/v1/shops/" + slots[2].ShopID + "/upgrade", http.StatusConflict, "SLOT_LOCKED"},
+			{"待开业店铺升级", "/api/v1/shops/flowers/upgrade", http.StatusConflict, "SHOP_NOT_OPEN"},
+		}
+		before, saves := a.service.Snapshot(), a.store.saveCount()
+		for _, tc := range cases {
+			recorder := a.call(http.MethodPost, tc.target, "{}")
+			assertErrorCode(t, recorder, tc.status, tc.code)
+		}
+		if !reflect.DeepEqual(a.service.Snapshot(), before) || a.store.saveCount() != saves {
+			t.Fatal("被拒绝的命令不得改变状态或写入存档")
+		}
+		// 满级：把第一家店升到顶。
+		assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}"), http.StatusOK)
+		levels := len(a.config.Shops[0].LevelCoinsPerVisitor)
+		for level := 1; level < levels; level++ {
+			assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/coffee/upgrade", "{}"), http.StatusOK)
+		}
+		recorder := a.call(http.MethodPost, "/api/v1/shops/coffee/upgrade", "{}")
+		assertErrorCode(t, recorder, http.StatusConflict, "MAX_LEVEL")
+		if view := a.service.Snapshot(); view.Shops[0].UpgradeCost != nil {
+			t.Fatalf("满级店铺的 upgradeCost 必须为 null：%+v", view.Shops[0])
+		}
+		// 金币不足：另起一份初始金币恰好只够第一个二层铺位的存档。
+		poor := fundedConfig(t)
+		poor.InitialCoins = slots[2].UnlockCost
+		b := newTestAPIWithConfig(t, testDevToken, []string{testOrigin}, poor)
+		assertStatus(t, b.call(http.MethodPost, "/api/v1/slots/"+slots[2].ID+"/unlock", "{}"), http.StatusOK)
+		if state := b.service.Snapshot(); state.Coins >= slots[3].UnlockCost {
+			t.Fatalf("测试前提不成立：余额 %d 仍买得起 %s", state.Coins, slots[3].ID)
+		}
+		assertErrorCode(t, b.call(http.MethodPost, "/api/v1/slots/"+slots[3].ID+"/unlock", "{}"), http.StatusConflict, "INSUFFICIENT_COINS")
 	})
 }
 
@@ -598,7 +782,10 @@ func TestRoutingErrors(t *testing.T) {
 		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v1/mall/settle", http.StatusMethodNotAllowed},
 		{http.MethodDelete, "/api/v1/mall", http.StatusMethodNotAllowed},
-		{http.MethodGet, "/api/v1/shops/clothing/prepare", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/shops/coffee/prepare", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/shops/coffee/upgrade", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/slots/f2-s1/unlock", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/api/v1/slots/unlock", http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
@@ -639,7 +826,7 @@ func TestConcurrentPrepareThroughHandler(t *testing.T) {
 			defer group.Done()
 			<-start
 			recorder := httptest.NewRecorder()
-			a.handler.ServeHTTP(recorder, a.newRequest(http.MethodPost, "/api/v1/shops/clothing/prepare", "{}"))
+			a.handler.ServeHTTP(recorder, a.newRequest(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}"))
 			if recorder.Code != http.StatusOK {
 				results <- game.Result{}
 				return

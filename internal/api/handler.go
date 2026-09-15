@@ -51,6 +51,21 @@ func NewHandler(service *game.Service, options Options) (http.Handler, error) {
 		result, err := service.Prepare(r.PathValue("id"))
 		respondOperation(w, r, options.Logger, result, err)
 	})
+	mux.HandleFunc("POST /api/v1/shops/{id}/upgrade", func(w http.ResponseWriter, r *http.Request) {
+		if !readEmptyCommand(w, r) {
+			return
+		}
+		result, err := service.Upgrade(r.PathValue("id"))
+		respondOperation(w, r, options.Logger, result, err)
+	})
+	// Unlock addresses a slot id ("f2-s1"); shop commands address a shop id ("clothing").
+	mux.HandleFunc("POST /api/v1/slots/{slotId}/unlock", func(w http.ResponseWriter, r *http.Request) {
+		if !readEmptyCommand(w, r) {
+			return
+		}
+		result, err := service.Unlock(r.PathValue("slotId"))
+		respondOperation(w, r, options.Logger, result, err)
+	})
 	mux.HandleFunc("POST /api/v1/mall/settle", func(w http.ResponseWriter, r *http.Request) {
 		if !readEmptyCommand(w, r) {
 			return
@@ -137,6 +152,20 @@ func respondOperation(w http.ResponseWriter, r *http.Request, logger *slog.Logge
 	switch {
 	case errors.Is(err, game.ErrUnknownShop):
 		writeError(w, http.StatusNotFound, "SHOP_NOT_FOUND", "店铺不存在")
+	case errors.Is(err, game.ErrUnknownSlot):
+		// An unknown slot id reuses the stable "target does not exist" code so the
+		// client handles both id systems the same way.
+		writeError(w, http.StatusNotFound, "SHOP_NOT_FOUND", "铺位不存在")
+	case errors.Is(err, game.ErrSlotLocked):
+		writeError(w, http.StatusConflict, "SLOT_LOCKED", "该铺位尚未解锁")
+	case errors.Is(err, game.ErrSlotOrder):
+		writeError(w, http.StatusConflict, "SLOT_ORDER", "必须按顺序解锁铺位")
+	case errors.Is(err, game.ErrShopNotOpen):
+		writeError(w, http.StatusConflict, "SHOP_NOT_OPEN", "店铺尚未开业，不能升级")
+	case errors.Is(err, game.ErrMaxLevel):
+		writeError(w, http.StatusConflict, "MAX_LEVEL", "店铺已满级")
+	case errors.Is(err, game.ErrInsufficientCoins):
+		writeError(w, http.StatusConflict, "INSUFFICIENT_COINS", "金币不足")
 	case errors.Is(err, game.ErrClockBackwards):
 		writeError(w, http.StatusConflict, "CLOCK_BACKWARDS", "服务端时间回退，暂不结算")
 	case errors.Is(err, game.ErrNumericLimit):

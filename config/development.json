@@ -1,14 +1,24 @@
 {
-  "rulesVersion": "m01-prototype-v1",
+  "rulesVersion": "m02-v2",
   "initialCoins": 1280,
-  "dailyVisitors": 50,
+  "baseVisitors": 20,
+  "visitorsPerShop": 15,
+  "fullFloorBonus": 1,
   "visitorIntervalSeconds": 5,
   "businessTimezone": "Asia/Shanghai",
+  "slots": [
+    { "id": "f1-s1", "floor": 1, "position": 1, "shopId": "coffee", "unlockOrder": 0, "unlockCost": 0 },
+    { "id": "f1-s2", "floor": 1, "position": 2, "shopId": "flowers", "unlockOrder": 0, "unlockCost": 0 },
+    { "id": "f2-s1", "floor": 2, "position": 1, "shopId": "clothing", "unlockOrder": 1, "unlockCost": 600 },
+    { "id": "f2-s2", "floor": 2, "position": 2, "shopId": "dessert", "unlockOrder": 2, "unlockCost": 800 },
+    { "id": "f2-s3", "floor": 2, "position": 3, "shopId": "bookstore", "unlockOrder": 3, "unlockCost": 1200 }
+  ],
   "shops": [
-    { "id": "clothing", "name": "衣橱", "floor": 2, "slot": 1, "coinsPerVisitor": 12 },
-    { "id": "dessert", "name": "甜屋", "floor": 2, "slot": 2, "coinsPerVisitor": 8 },
-    { "id": "bookstore", "name": "书店", "floor": 2, "slot": 3, "coinsPerVisitor": 10 },
-    { "id": "coffee", "name": "咖啡", "floor": 1, "slot": 1, "coinsPerVisitor": 6 },
-    { "id": "flowers", "name": "花束", "floor": 1, "slot": 2, "coinsPerVisitor": 9 }
-  ]
+    { "id": "coffee", "name": "咖啡", "floor": 1, "slot": 1, "levelCoinsPerVisitor": [6, 7, 8, 10, 11] },
+    { "id": "flowers", "name": "花束", "floor": 1, "slot": 2, "levelCoinsPerVisitor": [9, 10, 12, 14, 16] },
+    { "id": "clothing", "name": "衣橱", "floor": 2, "slot": 1, "levelCoinsPerVisitor": [12, 14, 16, 19, 22] },
+    { "id": "dessert", "name": "甜屋", "floor": 2, "slot": 2, "levelCoinsPerVisitor": [8, 9, 11, 13, 15] },
+    { "id": "bookstore", "name": "书店", "floor": 2, "slot": 3, "levelCoinsPerVisitor": [10, 12, 14, 16, 19] }
+  ],
+  "upgradeCosts": [300, 700, 1200, 2000]
 }
