@@ -18,6 +18,9 @@ NewProject/profiles/
 .workbuddy/
 .workbuddy-ai/
 
+# Qoder 技能在本机的报告产物（会话 token / credits 消耗的 Canvas 快照），不入库
+.qoder-credits/
+
 # 模块任务的中间产物（切片、临时脚本输出），不入库
 # 最终素材落在 assets/，可复现的管线脚本如需留存应移到 tools/
 .work/
