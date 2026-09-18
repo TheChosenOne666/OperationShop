@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -272,9 +273,15 @@ func (s *Service) Prepare(id string) (Result, error) {
 	if !s.unlocked(s.state, s.cfg.Slots[s.shopSlot[index]].ID) {
 		return Result{}, ErrSlotLocked
 	}
-	return s.mutate(func(next *State) error {
+	return s.mutate(func(next *State, now time.Time) error {
 		// Hard order: mark prepared, then recompute the floor, then record the price.
 		next.Shops[index].Prepared = true
+		// Idle settlements deliberately leave the settlement cursor untouched, so when
+		// the very first shop of a day opens the cursor is stale and must be anchored
+		// to this instant; later shops keep the remainder that accrual already preserved.
+		if openShopCount(*next) == 1 {
+			next.LastAccrualAt = now
+		}
 		s.syncFloorSegments(next, s.cfg.Shops[index].Floor)
 		return nil
 	})
@@ -299,7 +306,7 @@ func (s *Service) Unlock(slotID string) (Result, error) {
 	if s.state.Coins < slot.UnlockCost {
 		return Result{}, ErrInsufficientCoins
 	}
-	return s.mutate(func(next *State) error {
+	return s.mutate(func(next *State, _ time.Time) error {
 		// No overflow guard is needed: a valid save keeps
 		// coins == initialCoins + Σrevenue − spent, so coins >= cost implies
 		// spent + cost <= total <= maxSafeInteger.
@@ -333,7 +340,7 @@ func (s *Service) Upgrade(shopID string) (Result, error) {
 	if s.state.Coins < cost {
 		return Result{}, ErrInsufficientCoins
 	}
-	return s.mutate(func(next *State) error {
+	return s.mutate(func(next *State, _ time.Time) error {
 		// See Unlock: the coin identity makes an overflowing spent value impossible.
 		next.Coins -= cost
 		next.Spent += cost
@@ -417,8 +424,9 @@ func (s *Service) syncSegments(state *State, shopIndex int) {
 }
 
 // mutate settles first, then applies one command, then commits before publishing.
-// A nil apply is a plain settlement and is skipped when nothing changed.
-func (s *Service) mutate(apply func(*State) error) (Result, error) {
+// A nil apply is a plain settlement; when it moves nothing but the observation
+// cursor it is reported as unchanged and never committed.
+func (s *Service) mutate(apply func(*State, time.Time) error) (Result, error) {
 	now := s.now().UTC()
 	if now.Before(s.state.LastObservedAt) {
 		return Result{}, ErrClockBackwards
@@ -429,12 +437,12 @@ func (s *Service) mutate(apply func(*State) error) (Result, error) {
 		return Result{}, err
 	}
 	if apply != nil {
-		if err := apply(&next); err != nil {
+		if err := apply(&next, now); err != nil {
 			return Result{}, err
 		}
 	}
 	next.LastObservedAt = now
-	if apply == nil && now.Equal(s.state.LastObservedAt) {
+	if apply == nil && sameCommittedState(next, s.state) {
 		return Result{State: s.view(s.state)}, nil
 	}
 	if next.Revision == maxSafeInteger {
@@ -449,6 +457,26 @@ func (s *Service) mutate(apply func(*State) error) (Result, error) {
 	return result, nil
 }
 
+// sameCommittedState reports whether two states differ only by the observation
+// cursor, which is the one field a settlement may move without committing.
+func sameCommittedState(a, b State) bool {
+	left, right := a, b
+	left.LastObservedAt, right.LastObservedAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(left, right)
+}
+
+// openShopCount is the number of shops currently open, which drives both the
+// daily visitor cap tier and whether a settlement can produce any visitor.
+func openShopCount(state State) int64 {
+	var count int64
+	for _, shop := range state.Shops {
+		if shop.Prepared {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *Service) accrue(state *State, now time.Time, result *Result) error {
 	local := now.In(s.zone)
 	day := local.Format(time.DateOnly)
@@ -460,15 +488,10 @@ func (s *Service) accrue(state *State, now time.Time, result *Result) error {
 		// Past business days are not backfilled; no multi-day offline rewards.
 		state.LastAccrualAt = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, s.zone).UTC()
 	}
-	openShops := int64(0)
-	for _, shop := range state.Shops {
-		if shop.Prepared {
-			openShops++
-		}
-	}
-	// Nobody can be served before a shop opens, so the cap stays unfrozen.
+	openShops := openShopCount(*state)
+	// Nobody can be served before a shop opens, so the cap stays unfrozen. An idle
+	// poll must not move the settlement cursor, or it would look like a real change.
 	if openShops == 0 || (state.CapFrozen && state.VisitorsRemaining == 0) {
-		state.LastAccrualAt = now
 		return nil
 	}
 	interval := time.Duration(s.cfg.VisitorIntervalSeconds) * time.Second

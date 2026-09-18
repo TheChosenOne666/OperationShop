@@ -135,6 +135,7 @@ func (c Config) validateSlots() error {
 		positions[[2]int{shop.Floor, shop.Slot}] = shop.ID
 	}
 	ids := make(map[string]bool, len(c.Slots))
+	slotAt := make(map[[2]int]string, len(c.Slots))
 	floors := make(map[int]int, 2)
 	orders := make(map[int]bool, len(c.Slots))
 	for _, slot := range c.Slots {
@@ -146,6 +147,15 @@ func (c Config) validateSlots() error {
 			return fmt.Errorf("duplicate slot: %s", slot.ID)
 		}
 		ids[slot.ID] = true
+		// Two slots on one position would leave another shop without a slot, and an
+		// unmapped shop silently reads the first configured slot's unlock and floor
+		// state. Rejecting the collision keeps the shop↔slot relation a bijection:
+		// shop positions are already distinct and every slot must point at one.
+		position := [2]int{slot.Floor, slot.Position}
+		if taken := slotAt[position]; taken != "" {
+			return fmt.Errorf("slots %s and %s share floor %d position %d", taken, slot.ID, slot.Floor, slot.Position)
+		}
+		slotAt[position] = slot.ID
 		floors[slot.Floor]++
 		orders[slot.UnlockOrder] = true
 		if shopID, ok := positions[[2]int{slot.Floor, slot.Position}]; !ok || shopID != slot.ShopID {

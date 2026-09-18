@@ -687,7 +687,9 @@ func TestErrorMapping(t *testing.T) {
 	t.Run("时钟回退", func(t *testing.T) {
 		a := newTestAPI(t)
 		a.clock.set(testTime().Add(5 * time.Second))
-		assertStatus(t, a.call(http.MethodPost, "/api/v1/mall/settle", "{}"), http.StatusOK)
+		// 用一个必定提交的请求把观察时刻推进到 +5s：空闲结算不写状态，
+		// 因此不再能作为时钟回退的锚点（见 game 包 sameCommittedState）。
+		assertStatus(t, a.call(http.MethodPost, "/api/v1/slots/f2-s1/unlock", "{}"), http.StatusOK)
 		before, saves := a.service.Snapshot(), a.store.saveCount()
 		a.clock.set(testTime().Add(4 * time.Second))
 		recorder := a.call(http.MethodPost, "/api/v1/mall/settle", "{}")

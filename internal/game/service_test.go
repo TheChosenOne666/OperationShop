@@ -434,12 +434,16 @@ func TestServiceUnpreparedShopsDoNotAccrue(t *testing.T) {
 	service, store, clock := newTestService(t)
 	cfg := testConfig(t)
 	clock.set(testTime().Add(31*time.Second + 200*time.Millisecond))
+	saves := store.saveCount()
 	result := settleTestService(t, service)
-	assertTestResult(t, result, 0, 0, true)
+	assertTestResult(t, result, 0, 0, false)
 	state := service.snapshotState()
 	if state.Coins != cfg.InitialCoins || state.CapFrozen || state.VisitorsRemaining != 0 ||
-		!state.LastAccrualAt.Equal(clock.now()) {
-		t.Fatalf("未准备期间不应积累收益、冻结上限或保留可追补时间：%+v", state)
+		!state.LastAccrualAt.Equal(testTime()) || state.Revision != 1 {
+		t.Fatalf("未准备期间的空闲结算必须完全无副作用（游标不推进、不落盘）：%+v", state)
+	}
+	if store.saveCount() != saves {
+		t.Fatalf("空闲结算写了存档：%d → %d", saves, store.saveCount())
 	}
 	for _, shop := range state.Shops {
 		if shop.Prepared || shop.Visitors != 0 || shop.Revenue != 0 || len(shop.Segments) != 0 {
@@ -452,7 +456,7 @@ func TestServiceUnpreparedShopsDoNotAccrue(t *testing.T) {
 		t.Fatal("首次准备必须以准备时刻开始计时")
 	}
 	clock.set(testTime().Add(time.Minute + 5*time.Second - time.Nanosecond))
-	assertTestResult(t, settleTestService(t, service), 0, 0, true)
+	assertTestResult(t, settleTestService(t, service), 0, 0, false)
 	if service.snapshotState().CapFrozen {
 		t.Fatal("不足一个到店间隔时不得冻结当日客流上限")
 	}
@@ -462,6 +466,58 @@ func TestServiceUnpreparedShopsDoNotAccrue(t *testing.T) {
 	assertTestResult(t, result, testUnitPrice(t, cfg, state, index), 1, true)
 	assertTestStoredState(t, store, service.snapshotState())
 	assertTestLedger(t, cfg, service.snapshotState())
+}
+
+// TestSettleDoesNotCommitWithoutChange 验证三种空转结算一律 changed=false 且不写存档
+// （GDD §5.7.2「写入时机」；验收 #5 的 changed 语义），而跨业务日重置仍必须提交。
+func TestSettleDoesNotCommitWithoutChange(t *testing.T) {
+	service, store, clock := newFundedTestService(t)
+	cfg := service.Configuration()
+	interval := time.Duration(cfg.VisitorIntervalSeconds) * time.Second
+	idle := func(label string) {
+		t.Helper()
+		before, saves := service.snapshotState(), store.saveCount()
+		clock.set(clock.now().Add(time.Second))
+		assertTestResult(t, settleTestService(t, service), 0, 0, false)
+		if got := service.snapshotState(); got.Revision != before.Revision || !reflect.DeepEqual(got, before) {
+			t.Fatalf("%s：空转结算改动了已发布状态 %+v → %+v", label, before, got)
+		}
+		if store.saveCount() != saves {
+			t.Fatalf("%s：空转结算写了存档，落盘次数 %d → %d", label, saves, store.saveCount())
+		}
+		assertTestStoredState(t, store, before)
+	}
+	// 1) 零开业：反复轮询无副作用。
+	for i := 0; i < 3; i++ {
+		idle("零开业")
+	}
+	// 2) 开业但不足一个到店间隔。首位客人从「准备时刻」起算，不是从当日零点。
+	prepareAt := clock.now()
+	prepareTestShops(t, service, "coffee")
+	clock.set(prepareAt.Add(interval))
+	settleTestService(t, service)
+	for i := 0; i < 3; i++ {
+		idle("间隔未满")
+	}
+	// 3) 当日客流耗尽。
+	clock.set(testTime().Add(time.Duration(testCap(cfg, 1)+2) * interval))
+	settleTestService(t, service)
+	if state := service.snapshotState(); !state.CapFrozen || state.VisitorsRemaining != 0 {
+		t.Fatalf("应先耗尽当日客流：%+v", state)
+	}
+	for i := 0; i < 3; i++ {
+		idle("耗尽后")
+	}
+	// 跨业务日：上限与游标都要重置，必须落盘。
+	before, saves := service.snapshotState(), store.saveCount()
+	clock.set(testTime().Add(48 * time.Hour))
+	if result := settleTestService(t, service); !result.Changed {
+		t.Fatalf("跨业务日重置必须提交，实际 changed=false：%+v", service.snapshotState())
+	}
+	if after := service.snapshotState(); after.Revision != before.Revision+1 || store.saveCount() != saves+1 {
+		t.Fatalf("跨业务日重置未提交：revision %d→%d，落盘 %d→%d",
+			before.Revision, after.Revision, saves, store.saveCount())
+	}
 }
 
 // TestServicePrepareIsIdempotent 验证重复准备不结算、不保存且不改变状态。
@@ -531,10 +587,10 @@ func TestServiceSettlementRetainsRemainder(t *testing.T) {
 		visitors int64
 		changed  bool
 	}{
-		{5*time.Second - time.Nanosecond, 0, 0, true},
+		{5*time.Second - time.Nanosecond, 0, 0, false},
 		{5 * time.Second, 5 * time.Second, 1, true},
 		{12500 * time.Millisecond, 10 * time.Second, 1, true},
-		{15*time.Second - time.Nanosecond, 10 * time.Second, 0, true},
+		{15*time.Second - time.Nanosecond, 10 * time.Second, 0, false},
 		{15 * time.Second, 15 * time.Second, 1, true},
 		{15 * time.Second, 15 * time.Second, 0, false},
 	}
@@ -546,8 +602,13 @@ func TestServiceSettlementRetainsRemainder(t *testing.T) {
 		assertTestResult(t, result, step.visitors*price, step.visitors, step.changed)
 		total += step.visitors
 		state := service.snapshotState()
-		if !state.LastAccrualAt.Equal(testTime().Add(step.accrued)) || !state.LastObservedAt.Equal(clock.now()) {
-			t.Fatalf("经过 %s 后结算时间或观察时间不符：%+v", step.elapsed, state)
+		if !state.LastAccrualAt.Equal(testTime().Add(step.accrued)) {
+			t.Fatalf("经过 %s 后结算游标不符：%+v", step.elapsed, state)
+		}
+		// 未提交的空转结算不写存档（由下方 saves 计数把关）；客户端视图里的
+		// lastObservedAt 语义是「最后一次发布状态的时刻」，不是「最后一次被轮询的时刻」。
+		if step.changed && !state.LastObservedAt.Equal(clock.now()) {
+			t.Fatalf("提交后观察时刻应为本次结算时刻：%+v", state)
 		}
 		if state.Coins != cfg.InitialCoins+total*price {
 			t.Fatalf("经过 %s 后累计资源不符：%+v", step.elapsed, state)
@@ -641,15 +702,16 @@ func TestServiceVisitorsExhausted(t *testing.T) {
 		}
 	}
 	clock.set(clock.now().Add(time.Hour))
+	beforeExhausted := service.snapshotState()
 	result = settleTestService(t, service)
-	assertTestResult(t, result, 0, 0, true)
+	assertTestResult(t, result, 0, 0, false)
 	after := service.snapshotState()
 	if after.Coins != state.Coins || after.VisitorsRemaining != state.VisitorsRemaining ||
 		!reflect.DeepEqual(after.Shops, state.Shops) {
 		t.Fatal("客流耗尽后不能继续产出")
 	}
-	if !after.LastAccrualAt.Equal(clock.now()) {
-		t.Fatal("耗尽期间不应保留待补时间")
+	if !beforeExhausted.LastAccrualAt.Equal(after.LastAccrualAt) || beforeExhausted.Revision != after.Revision {
+		t.Fatalf("耗尽期间的空闲结算必须原样返回，不得推进游标或递增修订号：%+v → %+v", beforeExhausted, after)
 	}
 }
 
@@ -1234,21 +1296,25 @@ func TestFloorBonusAppliesOnlyWhenFloorIsFull(t *testing.T) {
 func TestVisitorCapFreezesOnFirstServedSettle(t *testing.T) {
 	service, store, clock := newTestService(t)
 	cfg := testConfig(t)
-	// 0 店开业：反复结算都不冻结、不落盘。
+	// 0 店开业：反复结算都不冻结、不落盘（GDD §5.7.2）。
+	idleSaves := store.saveCount()
 	clock.set(testTime().Add(30 * time.Second))
-	assertTestResult(t, settleTestService(t, service), 0, 0, true)
+	assertTestResult(t, settleTestService(t, service), 0, 0, false)
 	clock.set(testTime().Add(60 * time.Second))
-	assertTestResult(t, settleTestService(t, service), 0, 0, true)
+	assertTestResult(t, settleTestService(t, service), 0, 0, false)
+	if store.saveCount() != idleSaves {
+		t.Fatalf("0 店开业的空闲结算写了存档：落盘次数 %d → %d", idleSaves, store.saveCount())
+	}
 	if state := service.snapshotState(); state.CapFrozen || state.DailyVisitorCap != 0 || state.VisitorsRemaining != 0 {
 		t.Fatalf("0 店开业不得冻结上限：%+v", state)
 	}
 	if view := service.Snapshot(); view.CapFrozen || view.DailyVisitorCap != nil || view.VisitorsServed != 0 {
 		t.Fatalf("未冻结时接口必须返回 null 上限：%+v", view)
 	}
-	// 开店但不足一个间隔：仍不冻结。
+	// 开店但不足一个间隔：仍不冻结，且不落盘。
 	prepareTestShops(t, service, "coffee")
 	clock.set(clock.now().Add(5*time.Second - time.Nanosecond))
-	assertTestResult(t, settleTestService(t, service), 0, 0, true)
+	assertTestResult(t, settleTestService(t, service), 0, 0, false)
 	if service.snapshotState().CapFrozen {
 		t.Fatal("不足一个到店间隔不得冻结")
 	}

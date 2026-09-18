@@ -148,6 +148,9 @@ func TestConfigValidate(t *testing.T) {
 		{"铺位楼层越界", func(c *Config) { c.Slots[0].Floor = 3 }, true},
 		{"铺位位置为零", func(c *Config) { c.Slots[0].Position = 0 }, true},
 		{"铺位位置重复", func(c *Config) { c.Slots[3].Position = c.Slots[2].Position }, true},
+		{"两铺位同位置且店铺一致", func(c *Config) {
+			c.Slots[4].Floor, c.Slots[4].Position, c.Slots[4].ShopID = 2, 2, "dessert"
+		}, true},
 		{"负解锁顺序", func(c *Config) { c.Slots[2].UnlockOrder = -1 }, true},
 		{"负解锁价格", func(c *Config) { c.Slots[2].UnlockCost = -1 }, true},
 		{"解锁价格越界", func(c *Config) { c.Slots[2].UnlockCost = 1_000_000_001 }, true},
