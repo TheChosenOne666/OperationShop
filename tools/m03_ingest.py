@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""M03 素材入库管线：外部生成的品红底原图 → 抠像 → 定尺 → 客观自检 → 入库 → 回写进度。
+"""M03 素材入库管线：外部生成的纯色幕布底原图 → 抠像 → 定尺 → 客观自检 → 入库 → 回写进度。
 
-依赖：Pillow + numpy（与既有 `.work/m03/build_assets.py` 同一套，本脚本未新增第三方库）。
+依赖：Pillow + numpy（与既有 `.work/m03/build_assets.py` 同一套）；另用 scipy.ndimage 做
+水印判据所需的连通域标记——scipy 缺失时该条判据自动跳过，不影响其余流程。
 
     python tools/m03_ingest.py spec              # 解析规格并与 ASTC 算式对账
     python tools/m03_ingest.py check             # 自检已入库件（含跨立绘等高的组校验）
     python tools/m03_ingest.py check a.png ...   # 自检指定文件
     python tools/m03_ingest.py ingest            # 预演 .work/incoming 下的候选，不写盘
+    python tools/m03_ingest.py ingest a.png ...  # 预演指定原图（复查已退回样本用）
     python tools/m03_ingest.py ingest --apply    # 择优入库并勾掉投喂包 §5 进度表
 
 **规格唯一来源是 `assets/M03-素材投喂包.md` §1 的逐件清单**——本脚本只解析、不复制尺寸与体积
@@ -45,8 +47,11 @@ FEED_DOC = ROOT / "assets" / "M03-素材投喂包.md"
 TEXTURES = ROOT / "assets" / "textures"
 INCOMING = ROOT / ".work" / "incoming"
 
-KEY_RGB = (255, 0, 255)            # §1.7 A11：背景必须是单一纯品红
-KEY_TOL = 96                       # 与品红的 L1 距离阈值，小于此判为背景
+KEY_TOL = 96                       # 与幕布色的 L1 距离阈值，小于此判为背景
+KEY_FLAT_MAX = 24                  # 边缘带对键色的 L1 九十五分位上限：超过即幕布有可见渐变/纹理
+KEY_EDGE_MIN = 0.5                 # 边缘带里至少这么多像素落在键色 ±KEY_TOL 内，否则定位不到幕布
+KEY_SAT_MIN = 60                   # 幕布色的最小通道极差：白/灰/黑底一律拒收（A13 棋盘格那类）
+SPEC_KEY_RGB = (255, 0, 255)       # 《美术圣经》§1.7 A11 的推荐键色，偏离只提示不拦
 OUTLINE_RGB = (0x4A, 0x2F, 0x1E)   # §1.7 A7：描线色，且不得出现纯黑
 FORBIDDEN_HUE = (180.0, 330.0)     # §1.7 A9：蓝 / 青 / 紫 / 洋红 的色相禁区（度）
 LUMA = np.array([0.2126, 0.7152, 0.0722])
@@ -141,36 +146,94 @@ def erode(mask: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- 测量与判定
-def measure(img: Image.Image, raw: bool = False) -> dict:
+def detect_key(img: Image.Image) -> dict:
+    """从画面边缘带实测幕布色与幕布质量。
+
+    《美术圣经》§1.7 A11 写的是 `#FF00FF`，但生图模型对色名的理解不可靠——实测豆包连续两次
+    把它画成玫红 RGB(205,51,81)／(247,64,87)，自产图则画成肉粉 (237,151,141)。A11 真正要的是
+    「一块能干净抠掉的均匀高饱和幕布」，不是那串数值，故改为**按图取键色**。
+
+    键色取**边缘带的中位数**，平整度取**边缘带像素到键色 L1 距离的 95 分位**。校准依据
+    `.work/qa-m03/calibrate_flat.py`：三张真图（两张豆包、一张自产，幕布均为人工确认的平整纯色）
+    实测 6.0／11.0／16.0；在同样三张图上合成 8% 高度渐变 → 31／39／55，合成 5% 明度的水平条纹
+    纹理 → 23／27／33，合成 ±6 通道噪点 → 17／21／22。阈值取 24 落在「真图最高 16」与「渐变最低
+    31」之间，且容忍了等价于 JPG 压缩噪点的 ±6 抖动。
+
+    只用边缘带、且用分位数而非均值，是为了不被角落杂物带偏：平台水印通常只占边缘像素的百分之几，
+    均值/max 会把它误报成「幕布有渐变」，95 分位不会。
+    """
+    arr = np.asarray(img.convert("RGB")).astype(np.int32)
+    h, w = arr.shape[:2]
+    band = max(6, min(h, w) // 64)
+    edge = np.concatenate([arr[:band].reshape(-1, 3), arr[-band:].reshape(-1, 3),
+                           arr[:, :band].reshape(-1, 3), arr[:, -band:].reshape(-1, 3)])
+    color = np.median(edge, axis=0)
+    edge_dist = np.abs(edge - color).sum(axis=1)
+    dist = np.abs(arr - color).sum(axis=2)
+    return dict(color=color,
+                flat=float(np.percentile(edge_dist, 95)),
+                edge_share=float((edge_dist < KEY_TOL).mean()),
+                coverage=float((dist < KEY_TOL).mean()),
+                sat=float(color.max() - color.min()))
+
+
+def stray_blobs(mask: np.ndarray, keep_ratio: float = 0.05) -> tuple[np.ndarray, float, bool]:
+    """剔除不连到主体的散块（平台水印/角标/幕布杂物），返回（清理后掩膜，被剔面积占比，是否有块落在四角带）。
+
+    保留面积 ≥ 最大块 `keep_ratio` 的连通块——彩灯串这类合法素材本身可能有分离的较大部件，
+    不能一律按散块删掉。水印通常是最大块面积的千分之几，会被稳定剔除。
+    平台角标几乎总在画面角落，故单独标记，供上层判断是「水印」还是「杂物」。
+    """
+    from scipy import ndimage  # 局部导入：仅本判据用到，scipy 缺失时由调用方降级处理
+    labels, count = ndimage.label(mask)
+    if count <= 1:
+        return mask, 0.0, False
+    sizes = ndimage.sum(mask, labels, range(1, count + 1))
+    main = int(sizes.argmax())
+    keep = sizes >= sizes[main] * keep_ratio
+    h, w = mask.shape
+    stray_area, corner_hit = 0.0, False
+    for lab in range(1, count + 1):
+        if keep[lab - 1]:
+            continue
+        area = float(sizes[lab - 1]) / mask.size
+        stray_area += area
+        ys, xs = np.nonzero(labels == lab)
+        if (ys.min() < h * 0.15 or ys.max() > h * 0.85) and (xs.min() < w * 0.15 or xs.max() > w * 0.85):
+            corner_hit = True
+    return np.isin(labels, [i + 1 for i in range(count) if keep[i]]), stray_area, corner_hit
+
+
+def measure(img: Image.Image, key: np.ndarray | None = None) -> dict:
     """采集客观测量值。
 
-    `raw=True` 时输入是**尚未抠像的品红底原图**（整幅不透明），故主体改由「非键色像素」界定，
-    否则所有按主体统计的指标都会被背景污染。透明类指标（真透明/毛边/键色残留/贴边）对原图无意义，
-    由 evaluate 负责不采信。
+    传入 `key`（幕布色）时按**原图**统计，主体由「非幕布色」界定——原图整幅不透明，若按 alpha
+    统计会被背景污染。不传则按已抠好 alpha 的入库件统计，主体＝不透明像素。
     """
     rgba = np.asarray(img.convert("RGBA")).astype(np.int32)
     rgb, alpha = rgba[:, :, :3], rgba[:, :, 3]
-    key_dist = np.abs(rgb - np.array(KEY_RGB, dtype=np.int32)).sum(axis=2)
-    subject = (key_dist >= KEY_TOL) if raw else (alpha >= 250)
+    raw = key is not None
+    if raw:
+        subject = np.abs(rgb - key).sum(axis=2) >= KEY_TOL
+    else:
+        subject = alpha >= 250
     total = alpha.size
     ys, xs = np.nonzero(subject)
     bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1) if len(xs) else (0, 0, 0, 0)
     px = rgb[subject]
     neutral = ((rgb.min(axis=2) > 215) & ((rgb.max(axis=2) - rgb.min(axis=2)) < 14))
 
-    out = dict(size=img.size, bbox=bbox,
+    out = dict(raw=raw, size=img.size, bbox=bbox,
                opaque_ratio=subject.sum() / total,
                soft_alpha=((alpha > 0) & (alpha < 255)).sum() / total,
                key_residue=0.0, forbidden_hue=0.0, pure_black=0, outline_dist=0.0,
-               raw_key_dist=float(np.mean([key_dist[:12, :12].mean(), key_dist[:12, -12:].mean(),
-                                           key_dist[-12:, :12].mean(), key_dist[-12:, -12:].mean()])),
-               raw_key_ratio=float((key_dist < KEY_TOL).mean()),
                raw_neutral=float(neutral.mean()))
     if len(px) == 0:
         return out
     r, g, b = px[:, 0], px[:, 1], px[:, 2]
     hue = (np.degrees(np.arctan2(np.sqrt(3) * (g - b), 2 * r - g - b)) + 360) % 360
-    out["key_residue"] = float((np.abs(px - np.array(KEY_RGB, dtype=np.int32)).sum(axis=1) < 150).mean())
+    if key is not None:
+        out["key_residue"] = float((np.abs(px - key).sum(axis=1) < 150).mean())
     out["forbidden_hue"] = float(((hue >= FORBIDDEN_HUE[0]) & (hue <= FORBIDDEN_HUE[1])).mean())
     out["pure_black"] = int(((px == 0).all(axis=1)).sum())
     darkest = px[np.argsort(px @ LUMA)[: max(1, len(px) // 200)]]
@@ -181,7 +244,8 @@ def measure(img: Image.Image, raw: bool = False) -> dict:
 def evaluate(img: Image.Image, asset: str, target: dict, is_raw: bool) -> list[tuple[str, str, str]]:
     """返回 [(编号, 级别, 说明)]，级别 ∈ PASS / WARN / FAIL。"""
     pol = POLICY[kind_of(asset)]
-    m = measure(img, raw=is_raw)
+    backdrop = detect_key(img) if is_raw else None
+    m = measure(img, key=backdrop["color"] if backdrop else None)
     w, h = m["size"]
     x0, y0, x1, y1 = m["bbox"]
     res: list[tuple[str, str, str]] = []
@@ -192,15 +256,35 @@ def evaluate(img: Image.Image, asset: str, target: dict, is_raw: bool) -> list[t
         short = min(w, h)
         add(("原图分辨率", "PASS" if short >= 1024 else "FAIL",
              f"短边 {short}px（要求 ≥1024；请勿自行缩放到交付尺寸）"))
-        add(("品红底", "PASS" if m["raw_key_dist"] < KEY_TOL else "FAIL",
-             f"四角与品红的 L1 距离 {m['raw_key_dist']:.0f}（阈值 {KEY_TOL}；有渐变/纹理/阴影即判重出）"))
-        add(("键色覆盖", "PASS" if m["raw_key_ratio"] >= 0.05 else "FAIL",
-             f"键色占全图 {m['raw_key_ratio'] * 100:.1f}%；浅中性占 {m['raw_neutral'] * 100:.1f}%（白/灰棋盘底须重出 A13）"))
-        # 只有在确认背景是品红之后，"主体贴边"才有意义；否则整幅都被当成主体，必然报贴边。
-        if m["raw_key_dist"] < KEY_TOL:
-            raw_margin = min(x0, y0, w - x1, h - y1)
-            add(("主体完整", "PASS" if raw_margin > 0 else "FAIL",
-                 f"主体距原图最近边 {raw_margin}px；贴边＝被生成器裁掉一块，须重出"))
+        color, flat, sat = backdrop["color"], backdrop["flat"], backdrop["sat"]
+        edge_share, coverage = backdrop["edge_share"], backdrop["coverage"]
+        rgb_txt = "RGB({:.0f},{:.0f},{:.0f})".format(*color)
+        add(("幕布可定位", "PASS" if edge_share >= KEY_EDGE_MIN else "FAIL",
+             f"边缘带 {edge_share * 100:.1f}% 的像素落在实测键色 ±{KEY_TOL} 内（阈值 {KEY_EDGE_MIN * 100:.0f}%；"
+             f"不足说明画面边缘被主体占满或底色不止一种，无法定幕布色）"))
+        add(("幕布平整", "PASS" if flat < KEY_FLAT_MAX else "FAIL",
+             f"实测幕布 {rgb_txt}，边缘带到键色 L1 的 95 分位 {flat:.1f}（阈值 {KEY_FLAT_MAX}；"
+             f"真图实测 6–16，合成 8% 渐变 31–55）"))
+        add(("幕布高饱和", "PASS" if sat >= KEY_SAT_MIN else "FAIL",
+             f"通道极差 {sat:.0f}（阈值 {KEY_SAT_MIN}；白/灰/黑底即 A13 那类假透明，一律拒收）"))
+        add(("幕布覆盖", "PASS" if coverage >= 0.05 else "FAIL",
+             f"幕布占全图 {coverage * 100:.1f}%；浅中性占 {m['raw_neutral'] * 100:.1f}%"))
+        mask = np.abs(np.asarray(img.convert("RGB")).astype(np.int32) - color).sum(axis=2) >= KEY_TOL
+        mask, stray, corner = stray_blobs(mask)
+        add(("散块清理", "PASS" if stray == 0 else ("FAIL" if stray > 0.02 else "WARN"),
+             f"将剔除非主体散块 {stray * 100:.2f}%"
+             + ("（落在画面角落＝平台水印/角标，已自动移除）" if corner and stray else "")
+             + ("；面积过大，疑似真被裁进画面的杂物，请人工确认" if stray > 0.02 else "")))
+        if np.abs(color - np.array(SPEC_KEY_RGB)).sum() > 3 * KEY_TOL:
+            add(("键色偏离", "WARN", f"A11 推荐 `#FF00FF`，实测 {rgb_txt}——可抠图，不拦；入库件将按实测色键控"))
+        # 贴边判定必须用**清理后**的掩膜：否则角落水印碰着画面边，会把一张合格图误判成"主体被裁"。
+        ys, xs = np.nonzero(mask)
+        if len(xs):
+            margin = min(xs.min(), ys.min(), w - 1 - xs.max(), h - 1 - ys.max())
+            add(("主体完整", "PASS" if margin > 0 else "FAIL",
+                 f"主体距画布最近边 {margin}px；贴边＝被裁掉一块，或幕布上有投影溢出"))
+        else:
+            add(("主体完整", "FAIL", "清理后画面无主体"))
     else:
         add(("尺寸", "PASS" if (w, h) == (target["w"], target["h"]) else "FAIL",
              f"{w}×{h}，目标 {target['w']}×{target['h']}"))
@@ -253,34 +337,51 @@ def evaluate(img: Image.Image, asset: str, target: dict, is_raw: bool) -> list[t
 
 
 # ---------------------------------------------------------------- 抠像与定尺
-def key_and_fit(src: Path, target: dict, feather: float = 0.8) -> Image.Image:
-    """品红键控 → 去噪 → 1px 腐蚀 → 高斯羽化 → 去品红溢色 → 按包围盒等比适配到目标画布（透明留白）。"""
-    arr = np.asarray(Image.open(src).convert("RGB")).astype(np.float64)
-    dist = np.abs(arr - np.array(KEY_RGB, dtype=np.float64)).sum(axis=2)
-    subject = dist >= KEY_TOL
-    subject = majority(subject, min_true=5)          # 先去背景碎点
-    subject = erode(subject)                         # 再剥 1px 键色描边（A14 防毛边）
+def despill(arr: np.ndarray, key: np.ndarray, strength: float = 1.0) -> np.ndarray:
+    """沿幕布色的色度方向把靠近幕布的像素推离，消除边缘溢色。
+
+    对品红幕布等效于经典的「压 R/B、抬 G」；对玫红等实测色同样成立，故不写死颜色。
+    """
+    center = float(key.mean())
+    direction = key.astype(np.float64) - center
+    norm = np.linalg.norm(direction)
+    if norm < 1:
+        return arr
+    direction /= norm
+    projection = (arr - center) @ direction
+    proximity = np.clip(1.0 - np.abs(arr - key).sum(axis=2) / (KEY_TOL * 3.0), 0.0, 1.0)
+    shift = np.clip(projection, 0, None) * proximity * strength
+    return arr - shift[:, :, None] * direction
+
+
+def key_and_fit(src: Path, target: dict, asset: str, feather: float = 0.8) -> Image.Image:
+    """按实测幕布色键控 → 去噪 → 1px 腐蚀 → 去溢色 → 羽化 → 包围盒裁切 → 等比适配到交付画布。"""
+    img = Image.open(src).convert("RGB")
+    key = detect_key(img)["color"]
+    arr = np.asarray(img).astype(np.float64)
+    subject = np.abs(arr - key).sum(axis=2) >= KEY_TOL
+    subject = majority(subject, min_true=5)          # 先去幕布碎点
+    subject = erode(subject)                         # 再剥 1px 幕布描边（A14 防毛边）
     subject = majority(subject, min_true=4)          # 补回被过度腐蚀的小面积
+    subject, stray, _ = stray_blobs(subject)         # 剔除平台水印/角标等不连主体的散块
 
     alpha = Image.fromarray(subject.astype(np.uint8) * 255)   # 单通道 → Pillow 自推为 "L"
     if feather > 0:
         alpha = alpha.filter(ImageFilter.GaussianBlur(feather))
-    # 去溢色：偏品红的像素把 R/B 拉向 G，避免边缘留一圈洋红
-    spill = np.clip(np.minimum(arr[:, :, 0], arr[:, :, 2]) - arr[:, :, 1], 0, None)
-    fixed = arr.copy()
-    fixed[:, :, 0] -= spill
-    fixed[:, :, 2] -= spill
-    body = Image.fromarray(np.clip(fixed, 0, 255).astype(np.uint8)).convert("RGBA")
+    body = Image.fromarray(np.clip(despill(arr, key), 0, 255).astype(np.uint8)).convert("RGBA")
     body.putalpha(alpha)
 
     bbox = alpha.getbbox()
     if bbox is None:
-        raise ValueError(f"{src.name}：键控后主体为空——背景不是品红，或 KEY_TOL 过宽")
+        raise ValueError(f"{src.name}：键控后主体为空——幕布判定过宽，或整幅是同一纯色")
     body = body.crop(bbox)
 
     canvas = Image.new("RGBA", (target["w"], target["h"]), (0, 0, 0, 0))
-    pad = round(min(canvas.size) * 0.06)             # 预留 6% 透明边距（D4）
-    avail_w, avail_h = canvas.width - 2 * pad, canvas.height - 2 * pad
+    if POLICY[kind_of(asset)]["transparent"]:
+        pad = round(min(canvas.size) * 0.06)         # 立绘/道具类预留 6% 透明边距（D4）
+        avail_w, avail_h = canvas.width - 2 * pad, canvas.height - 2 * pad
+    else:
+        avail_w, avail_h = canvas.width, canvas.height   # 全幅背景类：铺满画布，不留透明边
     scale = min(avail_w / body.width, avail_h / body.height)
     body = body.resize((max(1, round(body.width * scale)), max(1, round(body.height * scale))), Image.LANCZOS)
     canvas.paste(body, ((canvas.width - body.width) // 2, (canvas.height - body.height) // 2), body)
@@ -319,7 +420,10 @@ def cmd_spec(_: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     spec = load_spec()
-    paths = [Path(p) for p in args.paths] if args.paths else sorted(TEXTURES.rglob("*.png"))
+    # `_archive/` 下是同名的历史件（旧素材与新件共用资产名），缺省自检必须跳过，
+    # 否则一件会被查两遍、且立绘等高组校验会把两套基线混在一起算。
+    paths = ([Path(p) for p in args.paths] if args.paths
+             else [p for p in sorted(TEXTURES.rglob("*.png")) if "_archive" not in p.parts])
     total, checked, skipped = 0, 0, 0
     by_group: dict[str, list[Path]] = {}
     for path in paths:
@@ -350,11 +454,15 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     spec = load_spec()
-    if not INCOMING.is_dir():
+    if args.paths:
+        # 显式给路径时不受收件目录限制：便于复查已退回的样本，无需把它们搬回来。
+        candidates = [Path(p) for p in args.paths]
+    elif not INCOMING.is_dir():
         print(f"收件目录不存在：{INCOMING.relative_to(ROOT)}\n"
               f"建好后把生成的 PNG 放进去（文件名＝资产名，同一件多候选加 _c1/_c2 后缀）。")
         return 1
-    candidates = sorted(INCOMING.glob("*.png"))
+    else:
+        candidates = sorted(INCOMING.glob("*.png"))
     if not candidates:
         print(f"{INCOMING.relative_to(ROOT)} 里没有 PNG。投喂包 §3 要求格式为 PNG（JPG 会在品红底上产生压缩噪点，直接拒收）。")
         return 0
@@ -371,7 +479,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if fails:
             print("      → 退回重出，不入库。\n")
             continue
-        fitted = key_and_fit(path, spec[asset])
+        fitted = key_and_fit(path, spec[asset], asset)
         results2 = evaluate(fitted, asset, spec[asset], is_raw=False)
         report(f"{asset}（抠像定尺后）", results2, indent="      ")
         if not any(lvl == "FAIL" for _, lvl, _ in results2):
@@ -384,7 +492,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         for asset, (_, path) in sorted(winners.items()):
             dest = TEXTURES / POLICY[kind_of(asset)]["subdir"] / f"{asset}.png"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            key_and_fit(path, spec[asset]).save(dest, optimize=True)
+            key_and_fit(path, spec[asset], asset).save(dest, optimize=True)
             print(f"  已入库 {dest.relative_to(ROOT)}")
         flip_progress(list(winners))
     print(f"可入库 {len(winners)} / 清单 {len(spec)} 件。"
@@ -414,6 +522,7 @@ def main() -> int:
     p_check.add_argument("paths", nargs="*", help="缺省为 assets/textures 下全部 PNG（只跑 13 件清单内的）")
     p_check.set_defaults(func=cmd_check)
     p_ing = sub.add_parser("ingest", help="处理 .work/incoming 下的候选")
+    p_ing.add_argument("paths", nargs="*", help="显式指定原图路径（缺省为收件目录下的全部 PNG）")
     p_ing.add_argument("--apply", action="store_true", help="真正写盘并回写进度表")
     p_ing.set_defaults(func=cmd_ingest)
     args = parser.parse_args()
