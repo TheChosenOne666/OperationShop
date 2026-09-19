@@ -1,0 +1,5 @@
+{
+  "wechatAppid": "wx5a00e2270436e6e0",
+  "projectName": "streetcorner-mall",
+  "_note": "微信小游戏的项目身份，非机密（AppID 会随包公开）。构建机上的工具链路径不写在这里——那是每台机器不同的东西，走环境变量，见 tools/m04_build.py。"
+}

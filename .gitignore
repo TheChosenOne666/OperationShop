@@ -35,3 +35,8 @@ __pycache__/
 # 注：真正的工程配置在构建产物 NewProject/build/wechatgame/project.config.json 里，由构建生成。
 /project.config.json
 /project.private.config.json
+
+# 客户端构建期注入的本地后端地址与开发令牌——含机密，且每次构建重写。
+# .meta 一并忽略：脚本按路径 import、不按 uuid 引用，没有跨端一致性问题，忽略可免每次构建脏一次。
+NewProject/assets/scripts/BuildConfig.ts
+NewProject/assets/scripts/BuildConfig.ts.meta
