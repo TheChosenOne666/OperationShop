@@ -30,3 +30,8 @@ vibe_images/
 
 # tools/ 下脚本互相 import 时产生的字节码缓存，不入库
 __pycache__/
+
+# 微信开发者工具在仓库根落下的工程标记文件（IDE 本地状态，非项目源码）。
+# 注：真正的工程配置在构建产物 NewProject/build/wechatgame/project.config.json 里，由构建生成。
+/project.config.json
+/project.private.config.json
