@@ -44,7 +44,11 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parent.parent
 FEED_DOC = ROOT / "assets" / "M03-素材投喂包.md"
-TEXTURES = ROOT / "assets" / "textures"
+# 素材直接落在 Cocos 工程内（2026-09-19 迁移定案）：引擎只能导入 NewProject/assets 下的资源，
+# 单份存放可免掉"源图 + 引擎副本"两份一致性的维护。代价是这些无损 PNG 会被引擎看见，
+# 因此**纹理压缩（ASTC）必须在工程侧配好**，否则无损源图会直接进包——见 平台事实核对 §1.1.1。
+# 归档件（不进包的预留图）留在仓库根 assets/_archive/，务必不要放进来，否则会被一起打包。
+TEXTURES = ROOT / "NewProject" / "assets" / "textures"
 INCOMING = ROOT / ".work" / "incoming"
 
 KEY_TOL = 96                       # 与幕布色的 L1 距离阈值，小于此判为背景
@@ -420,10 +424,7 @@ def cmd_spec(_: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     spec = load_spec()
-    # `_archive/` 下是同名的历史件（旧素材与新件共用资产名），缺省自检必须跳过，
-    # 否则一件会被查两遍、且立绘等高组校验会把两套基线混在一起算。
-    paths = ([Path(p) for p in args.paths] if args.paths
-             else [p for p in sorted(TEXTURES.rglob("*.png")) if "_archive" not in p.parts])
+    paths = [Path(p) for p in args.paths] if args.paths else sorted(TEXTURES.rglob("*.png"))
     total, checked, skipped = 0, 0, 0
     by_group: dict[str, list[Path]] = {}
     for path in paths:
@@ -519,7 +520,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("spec", help="解析规格并与 ASTC 算式对账").set_defaults(func=cmd_spec)
     p_check = sub.add_parser("check", help="客观自检")
-    p_check.add_argument("paths", nargs="*", help="缺省为 assets/textures 下全部 PNG（只跑 13 件清单内的）")
+    p_check.add_argument("paths", nargs="*", help="缺省为 NewProject/assets/textures 下全部 PNG（只跑 13 件清单内的）")
     p_check.set_defaults(func=cmd_check)
     p_ing = sub.add_parser("ingest", help="处理 .work/incoming 下的候选")
     p_ing.add_argument("paths", nargs="*", help="显式指定原图路径（缺省为收件目录下的全部 PNG）")

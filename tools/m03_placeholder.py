@@ -22,7 +22,7 @@
   九宫格件（ui/state）与 bg 铺满画布——留白是给立绘外摆的，面板没有外摆，铺满才能让「九宫格边」判据有像素可测；
 - 5 张立绘共用同一套几何，使「立绘等高」组校验的顶/底边差为 0——这正是旧素材翻车的地方。
 
-    python tools/m03_placeholder.py            # 生成 13 件到 assets/textures/<类>/
+    python tools/m03_placeholder.py            # 生成 13 件到 NewProject/assets/textures/<类>/
     python tools/m03_placeholder.py --force    # 已存在时也覆盖
 """
 
