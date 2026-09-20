@@ -1,0 +1,104 @@
+// 铺位三态用的一份 2D 着色器：与 builtin-sprite 走同一条渲染路径，只多一个亮度档位 uniform。
+//
+// 依据 docs/architecture/架构现状.md §10：状态差异由「同一张贴图 + 材质参数 + 独立遮挡子节点」
+// 承担，不预烘多套 PNG —— 状态切换 = 改一个 GPU uniform，瞬间、无加载、无闪烁。
+// 档位取自《美术圣经》§7.2：S1 未开放 ≈ 0.30；S2 待开业 / S3 营业中 = 1.00。
+//
+// 结构照抄引擎自带的 effects/for2d/builtin-sprite.effect，只在 frag 末尾多乘一次亮度。
+// properties 里的名字必须与 uniform 块里的变量名一致（对照 chunks/builtin/internal/alpha-test.chunk）。
+CCEffect %{
+  techniques:
+  - passes:
+    - vert: sprite-vs:vert
+      frag: sprite-fs:frag
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: src_alpha
+          blendDst: one_minus_src_alpha
+          blendDstAlpha: one_minus_src_alpha
+      rasterizerState:
+        cullMode: none
+      properties:
+        alphaThreshold: { value: 0.5 }
+        u_emissive: { value: 1.0, editor: { range: [0.0, 1.0], slide: true, step: 0.01 } }
+}%
+
+CCProgram sprite-vs %{
+  precision highp float;
+  #include <builtin/uniforms/cc-global>
+  #if USE_LOCAL
+    #include <builtin/uniforms/cc-local>
+  #endif
+  #if SAMPLE_FROM_RT
+    #include <common/common-define>
+  #endif
+  in vec3 a_position;
+  in vec2 a_texCoord;
+  in vec4 a_color;
+
+  out vec4 color;
+  out vec2 uv0;
+
+  vec4 vert () {
+    vec4 pos = vec4(a_position, 1);
+
+    #if USE_LOCAL
+      pos = cc_matWorld * pos;
+    #endif
+
+    #if USE_PIXEL_ALIGNMENT
+      pos = cc_matView * pos;
+      pos.xyz = floor(pos.xyz);
+      pos = cc_matProj * pos;
+    #else
+      pos = cc_matViewProj * pos;
+    #endif
+
+    uv0 = a_texCoord;
+    #if SAMPLE_FROM_RT
+      CC_HANDLE_RT_SAMPLE_FLIP(uv0);
+    #endif
+    color = a_color;
+
+    return pos;
+  }
+}%
+
+CCProgram sprite-fs %{
+  precision highp float;
+  #include <builtin/internal/embedded-alpha>
+  #include <builtin/internal/alpha-test>
+
+  uniform SLOT_STATE {
+    float u_emissive;
+  };
+
+  in vec4 color;
+
+  // 宏由材质侧给：Material.initialize 的 defines 不写时"默认全为 0"（见引擎 asset/assets/material.ts
+  // 的 IMaterialInfo 注释），USE_TEXTURE=0 会走 #else 分支、采不到图。故 MallScene.ts 建材质时
+  // 显式传 defines: { USE_TEXTURE: true }。整条渲染路径与 builtin-sprite 保持一致。
+  #if USE_TEXTURE
+    in vec2 uv0;
+    #pragma builtin(local)
+    layout(set = 2, binding = 12) uniform sampler2D cc_spriteTexture;
+  #endif
+
+  vec4 frag () {
+    vec4 o = vec4(1, 1, 1, 1);
+
+    #if USE_TEXTURE
+      o *= CCSampleWithAlphaSeparated(cc_spriteTexture, uv0);
+    #endif
+
+    o *= color;
+    // 只压 RGB，不动 alpha：S1 的「暗」是压暗，不是变透明——变透明会透出背景，语义就错了。
+    o.rgb *= u_emissive;
+    ALPHA_TEST(o);
+    return o;
+  }
+}%

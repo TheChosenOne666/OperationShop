@@ -3,8 +3,8 @@
 // 刻意不含的东西（ADR 0001 服务端权威 / 客户端零计算）：没有单价表、没有客流公式、
 // 没有本地虚拟时间。界面显示的每一个数都直接来自最近一次服务端响应。
 //
-// 每 5 秒轮询 settle 属于 M05（经营闭环），这里不做；本文件只负责"开机取一次数"。
-import { _decorator, Component, Label } from "cc";
+// 每 5 秒轮询 settle 属于 M05（经营闭环），这里不做；本文件只负责"开机取一次数，然后进主界面"。
+import { _decorator, Component, director, Label } from "cc";
 import { ApiError, fetchConfig, fetchMall } from "./ApiClient";
 import type { Config, MallView } from "./ApiTypes";
 
@@ -26,6 +26,15 @@ export class Boot extends Component {
             this.config = cfg;
             this.render(mall);
             console.log(`[m04] 已取到服务端快照 revision=${mall.revision} 规则版本=${cfg.rulesVersion}`);
+            // B3.3：Boot 的职责就是"拉到数再进 Mall"。拉不到时停在 Boot 显示错误码，
+            // 不进一个只会重复报错的主界面。
+            // 必须延一帧：在 start() 里同步 loadScene 会在当前场景仍在激活流程时就被拆掉，
+            // 实测引擎报 Error 5000（重复销毁对象）。顺带让 Boot 这屏有个最短可见时间。
+            this.scheduleOnce(() => {
+                director.loadScene("Mall", (err) => {
+                    if (err) console.error("[m04] 进入 Mall 场景失败", err);
+                });
+            }, 0.2);
         } catch (err) {
             this.showError(err);
         }

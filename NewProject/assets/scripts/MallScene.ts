@@ -7,7 +7,7 @@
 //   草案 B3.4 分包策略 —— 铺位立绘与空铺底图在分包 mall_art，HUD 常驻件在主包内 Bundle ui_main。
 //   为什么全走路径加载：非 resources/Bundle 目录的资源不支持按路径加载，且手写场景里写 uuid
 //   资产引用最容易错；把两批素材都配成 Bundle 后，场景只留结构，取图全在代码里，可复现。
-import { _decorator, assetManager, Bundle, Component, Label, Node, Sprite, SpriteFrame } from "cc";
+import { _decorator, assetManager, Bundle, Component, EffectAsset, Label, Material, Node, Sprite, SpriteFrame } from "cc";
 import { ApiError, fetchConfig, fetchMall } from "./ApiClient";
 import type { Config, MallView } from "./ApiTypes";
 
@@ -17,6 +17,9 @@ const { ccclass } = _decorator;
 const ART_BUNDLE = "mall_art";
 /** 主包内的 Bundle：背景、HUD 木条、图标、状态遮挡件——首屏必需，随主包启动。 */
 const UI_BUNDLE = "ui_main";
+
+/** 三态材质用的着色器：放在主包 Bundle 里按路径取，避免在场景里写 uuid 引用。 */
+const EFFECT_PATH = "effects/slot-emissive";
 
 /** 架构现状 §10：S1 暗、S2 与 S3 亮，只有两档。 */
 const EMISSIVE_DIM = 0.3;
@@ -47,6 +50,7 @@ const SLOT_OVERLAY: ReadonlyArray<readonly [string, string]> = [
 export class MallScene extends Component {
     private bundles = new Map<string, Bundle>();
     private config: Config | null = null;
+    private effect: EffectAsset | null = null;
 
     async start(): Promise<void> {
         console.log("[m04] Mall 场景启动，准备加载 Bundle", ART_BUNDLE, UI_BUNDLE);
@@ -60,6 +64,7 @@ export class MallScene extends Component {
             this.bundles.set(ART_BUNDLE, art);
             this.bundles.set(UI_BUNDLE, ui);
             this.config = cfg;
+            await this.loadSlotEffect();
             this.applyStaticArt();
             this.renderSlots(mall);
             this.renderHud(mall);
@@ -67,6 +72,25 @@ export class MallScene extends Component {
         } catch (err) {
             this.showError(err);
         }
+    }
+
+    /**
+     * 取三态着色器。取不到**不阻断渲染**：铺位仍要靠 Veil/Lock/文字表达状态，
+     * 只是少了压暗那一档，所以只记日志不抛错。
+     */
+    private loadSlotEffect(): Promise<void> {
+        const bundle = this.bundles.get(UI_BUNDLE);
+        if (!bundle) return Promise.resolve();
+        return new Promise((resolve) => {
+            bundle.load(EFFECT_PATH, EffectAsset, (err, asset) => {
+                if (err || !asset) {
+                    console.error(`[m04] 三态着色器 ${EFFECT_PATH} 取不到，铺位将不压暗`, err);
+                } else {
+                    this.effect = asset;
+                }
+                resolve();
+            });
+        });
     }
 
     /** Bundle 加载失败不许白屏：铺位仍要有文字状态可读，所以只记日志、由调用侧决定降级。 */
@@ -165,10 +189,21 @@ export class MallScene extends Component {
         return null;
     }
 
-    /** 自发光档位靠自定义材质（§10）；材质还没接入时这里是安全的空操作。 */
+    /**
+     * 三态压暗：给铺位的 Art 挂一份由 slot-emissive 着色器建出的材质并设档位。
+     * **每个铺位各持一份材质实例**——共用一份会让 setProperty 相互串台，而 §10 要的是逐铺位状态。
+     */
     private applyEmissive(slotRoot: Node, value: number): void {
-        const mat = slotRoot.getChildByName("Art")?.getComponent(Sprite)?.customMaterial;
-        if (mat) mat.setProperty("u_emissive", value);
+        const sprite = slotRoot.getChildByName("Art")?.getComponent(Sprite);
+        if (!sprite) return;
+        if (!sprite.customMaterial) {
+            if (!this.effect) return;      // 着色器没取到就保持默认材质：只是不压暗，不报错
+            const mat = new Material();
+            // USE_TEXTURE 必须显式给：defines 不写时引擎"默认全为 0"，材质会走不采图的分支。
+            mat.initialize({ effectAsset: this.effect, defines: { USE_TEXTURE: true } });
+            sprite.customMaterial = mat;
+        }
+        sprite.customMaterial.setProperty("u_emissive", value);
     }
 
     private showError(err: unknown): void {
