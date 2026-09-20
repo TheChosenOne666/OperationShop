@@ -48,7 +48,14 @@ FEED_DOC = ROOT / "assets" / "M03-素材投喂包.md"
 # 单份存放可免掉"源图 + 引擎副本"两份一致性的维护。代价是这些无损 PNG 会被引擎看见，
 # 因此**纹理压缩（ASTC）必须在工程侧配好**，否则无损源图会直接进包——见 平台事实核对 §1.1.1。
 # 归档件（不进包的预留图）留在仓库根 assets/_archive/，务必不要放进来，否则会被一起打包。
-TEXTURES = ROOT / "NewProject" / "assets" / "textures"
+#
+# 2026-09-19 M04 分包改造：素材按「进主包 / 进分包」拆到两个 Asset Bundle 目录下，故这里的根
+# 上提到 assets/，由各类的 subdir 自带前缀（见下方 POLICY）——
+#   bundles/mall-art/  铺位立绘与空铺底图等（分包，运行时 loadBundle 取）
+#   bundles/ui-main/   背景与 HUD 常驻件（主包内的 Bundle，同样按路径加载）
+#   textures/          **不放进任何 Bundle**：app_icon / app_share 只给微信后台用，
+#                      场景不引用即不进包（已实测"未被引用的资源不进包"）。
+TEXTURES = ROOT / "NewProject" / "assets"
 INCOMING = ROOT / ".work" / "incoming"
 
 KEY_TOL = 96                       # 与幕布色的 L1 距离阈值，小于此判为背景
@@ -64,14 +71,14 @@ LUMA = np.array([0.2126, 0.7152, 0.0722])
 # 是否允许内容铺满画框（底图/面板类按画框出图，贴边不是缺陷；立绘的外摆须留 6% D4）、
 # 跨件组校验类别、入库子目录。
 POLICY = {
-    "bg": dict(block=8, mipmap=True, transparent=False, flush_ok=True, group=None, subdir="bg"),
-    "slt": dict(block=6, mipmap=True, transparent=True, flush_ok=True, group=None, subdir="slt"),
-    "shop": dict(block=6, mipmap=True, transparent=True, flush_ok=False, group="facade", subdir="shop"),
-    "prp": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group=None, subdir="prp"),
-    "app": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group=None, subdir="app"),
-    "ui": dict(block=6, mipmap=False, transparent=True, flush_ok=True, group="ninepatch", subdir="ui"),
-    "state": dict(block=6, mipmap=False, transparent=True, flush_ok=True, group="ninepatch", subdir="state"),
-    "ico": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group="circle", subdir="ico"),
+    "bg": dict(block=8, mipmap=True, transparent=False, flush_ok=True, group=None, subdir="bundles/ui-main/bg"),
+    "slt": dict(block=6, mipmap=True, transparent=True, flush_ok=True, group=None, subdir="bundles/mall-art/slt"),
+    "shop": dict(block=6, mipmap=True, transparent=True, flush_ok=False, group="facade", subdir="bundles/mall-art/shop"),
+    "prp": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group=None, subdir="bundles/mall-art/prp"),
+    "app": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group=None, subdir="textures/app"),
+    "ui": dict(block=6, mipmap=False, transparent=True, flush_ok=True, group="ninepatch", subdir="bundles/ui-main/ui"),
+    "state": dict(block=6, mipmap=False, transparent=True, flush_ok=True, group="ninepatch", subdir="bundles/ui-main/state"),
+    "ico": dict(block=6, mipmap=False, transparent=True, flush_ok=False, group="circle", subdir="bundles/ui-main/ico"),
 }
 
 # §1.7 / §1.8.3 中机器判不了、必须人眼的条目，按类列入「人工待勾」。
