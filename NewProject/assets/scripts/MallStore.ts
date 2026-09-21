@@ -64,12 +64,11 @@ export function diffArrivals(prev: MallView | null, next: MallView): Arrival[] {
     if (!prev) return [];
     const arrivals: Arrival[] = [];
     for (const shop of next.shops) {
+        // 同一会话内店铺清单由服务端配置固定、不会增减（改配置会改规则指纹→服务端拒旧档，
+        // 客户端随之重建基线），所以 find 不到只是类型上的兜底，不是需要出声的运行时分支
+        // （独立复核 SC-M05-QA-001 P2 指出原先的 warn 在真实协议下不可达，已去掉）。
         const before = prev.shops.find((s) => s.id === shop.id);
-        if (!before) {
-            // 只有换了规则配置才会出现无基线的店铺 id：不猜，出声。
-            console.warn(`[m05] 快照里出现无基线的店铺 ${shop.id}，本轮不计到店`);
-            continue;
-        }
+        if (!before) continue;
         const delta = shop.visitors - before.visitors;
         if (delta > 0) {
             arrivals.push({ shopId: shop.id, visitors: delta });
@@ -191,7 +190,12 @@ export class MallStore {
         });
     }
 
-    /** 入队一个请求。任务内部自行捕获异常，故串行链永不 reject。 */
+    /**
+     * 入队一个请求。任务体自带 try/catch 故正常情况下不会 reject，但**存进链上的那份必须再兜一道**：
+     * observer 是在 catch/accept 里被调用的，它自己抛的话 `run` 就 reject，而 rejected 的链会让
+     * 后续每个任务体**根本不执行**——那时入队时的 +1 再也等不到 -1，轮询永久卡在 skipped-busy
+     * 且静默无错（独立复核 SC-M05-QA-001 P1-1）。`finally` 只保证本任务减一次，救不了后面排队的。
+     */
     private enqueue(op: StoreOp, task: () => Promise<void>): Promise<void> {
         this.inFlight += 1;
         const run = this.chain.then(async () => {
@@ -206,17 +210,32 @@ export class MallStore {
                 this.inFlight -= 1;
             }
         });
-        this.chain = run;
+        this.chain = run.catch(() => undefined);
         return run;
     }
 
     /**
      * revision 单调守卫（验收第 3 条）：只接受比已应用值更高的 revision。
-     * 相等 = 本轮空转（服务端没发布新状态），更小 = 乱序到达的旧响应，
-     * 两种都丢弃——界面因此既不会回退，也不会把同一次到店播两遍。
+     * 相等 = 本轮空转（服务端没发布新状态），更小 = 乱序到达的旧响应，两种都丢弃。
+     *
+     * ⚠️ 但「更小」不能一律当乱序：删档重建、或改 config 使规则指纹变化而服务端拒旧档时，
+     * 服务端会**从 revision 1 重新计数**，此后每份响应都比基线小，继续丢弃等于界面永久冻结
+     * 在旧值上且不报错（独立复核 SC-M05-QA-001 P1-2 抓到的正是这条）。
+     * 故把「指纹变了」或「revision 变小」判为**基线作废**：清掉基线、当首帧重新应用。
+     * 首帧无基线可做差，arrivals 自然为空——只落数值不放客人，宁可少画也不凭累计值乱猜。
      */
     private passesGuard(view: MallView): boolean {
-        return this.applied === null || view.revision > this.applied.revision;
+        const applied = this.applied;
+        if (!applied) return true;
+        if (view.rulesFingerprint !== applied.rulesFingerprint || view.revision < applied.revision) {
+            console.warn(
+                `[m05] 基线作废（指纹 ${applied.rulesFingerprint} → ${view.rulesFingerprint}，` +
+                `revision ${applied.revision} → ${view.revision}），按首帧重新应用`,
+            );
+            this.applied = null;
+            return true;
+        }
+        return view.revision > applied.revision;
     }
 
     private accept(view: MallView, result: Result | null, op: StoreOp): void {
@@ -232,16 +251,19 @@ export class MallStore {
             // 不等说明基线错位（中途换档、或漏应用过一次响应），必须出声而不是默默画错人数。
             console.warn(`[m05] 逐店到店合计 ${shown} 与服务端 visitorsUsed=${result.visitorsUsed} 不一致（op=${op}）`);
         }
-        this.applied = view;
-        console.log(
-            `[m05] 应用 ${op} 响应 revision=${view.revision} changed=${result ? result.changed : "-"} ` +
-            `金币=${view.coins} 已到店=${view.visitorsServed} 本轮到店=${shown}`,
-        );
+        // 先交界面、**成功后才提交基线**：若 render / GuestStage.spawn 抛异常，基线不前移，
+        // 下一轮做差会把这批到店补上；反过来先提交基线就会出现"数字更新了、这批客人永久丢失"
+        // （独立复核 SC-M05-QA-001 P1-1 的后半段）。
         this.observer.onStoreUpdate({
             view,
             arrivals,
             earnedCoins: result ? result.earnedCoins : 0,
             op,
         });
+        this.applied = view;
+        console.log(
+            `[m05] 应用 ${op} 响应 revision=${view.revision} changed=${result ? result.changed : "-"} ` +
+            `金币=${view.coins} 已到店=${view.visitorsServed} 本轮到店=${shown}`,
+        );
     }
 }

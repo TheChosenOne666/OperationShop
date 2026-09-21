@@ -4,13 +4,18 @@
 // MallStore.ts 刻意不 import "cc"，所以能直接用 Node 自带的类型擦除跑：
 //     node --experimental-strip-types tools/m05_probe.ts
 //
-// 覆盖六类判据（对应 docs/M05-经营闭环.md §8 第 2 项）：
-//   ① 逐店 diff 正确（含无基线、含 0 到店、含累计倒退、含未知店铺）
-//   ② revision 单调守卫（相等/更小的响应被丢弃，界面不回退）
-//   ③ 请求串行不并发（忙时 tick 跳过而非排队；开店排在在飞请求之后）
+// 覆盖七类判据（对应 docs/M05-经营闭环.md §8 第 2 项）：
+//   ① 逐店 diff 正确（含无基线、含 0 到店、含累计倒退告警）
+//   ② revision 守卫：相等（空转）丢弃；变小判为服务端重建档 → 清基线重新应用
+//   ③ 请求串行不并发；界面回调抛异常既不投毒链、也不提交基线
 //   ④ 暂停期间不发请求，恢复时立即取权威状态
 //   ⑤ 逐店合计与服务端 visitorsUsed 不一致时出声但仍应用
 //   ⑥ 单个请求失败不断链，错误码上抛给界面层
+//   ⑦ 开店与首笔收益、以及「只给 visitors 有增量的店画客人」的数值形状
+// ⚠️ 边界要说清：本探针证的是**编排层**。S2→S3 换图、客人真走到门口、
+//    以及「未开业不产收益」这条服务端不变量，分别归实机截图与 internal/game 的 Go 测试。
+//    （独立复核 SC-M05-QA-001 P2 指出：夹具原先把 prepared 一律写死为 true，
+//     使"开店""未开业不出客人"两条变成断言自己造的假数据——已改为显式声明。）
 import assert from "node:assert";
 import { diffArrivals, MallStore } from "../NewProject/assets/scripts/MallStore.ts";
 import type { Arrival, StoreOp, StoreObserver, StoreTransport, StoreUpdate } from "../NewProject/assets/scripts/MallStore.ts";
@@ -34,7 +39,19 @@ console.error = (...args: unknown[]) => {
 // ---------- 构造假数据 ----------
 
 /** 按「店铺 id → 累计客流」造一份快照。其余字段填成与真服务端同形的值。 */
-function view(revision: number, coins: number, served: number, visitors: Record<string, number>): MallView {
+/**
+ * 按「店铺 id → 累计客流」造一份快照。
+ * `prepared` 显式给出**已开业**的店铺集合；省略时视为全部已开业。
+ * ⚠️ 不能一律写死 `prepared: true`——那会让"开店"与"未开业不出客人"两类用例变成
+ *    断言自己造的假数据（独立复核 SC-M05-QA-001 P2 抓到的正是这条）。
+ */
+function view(
+    revision: number,
+    coins: number,
+    served: number,
+    visitors: Record<string, number>,
+    prepared?: string[],
+): MallView {
     return {
         schemaVersion: 2,
         rulesFingerprint: "probe",
@@ -56,7 +73,7 @@ function view(revision: number, coins: number, served: number, visitors: Record<
             name: id,
             floor: 1,
             slot: 1,
-            prepared: true,
+            prepared: prepared ? prepared.includes(id) : true,
             level: 1,
             unitPrice: 6,
             visitors: visitors[id] ?? 0,
@@ -224,15 +241,10 @@ async function main(): Promise<void> {
         );
     });
 
-    check("快照里出现无基线的店铺 id → 跳过并出声", () => {
-        const prev = view(1, 1280, 4, { coffee: 4 });
-        const next = view(2, 1286, 5, { coffee: 5, bookstore: 1 });
-        assert.deepStrictEqual(diffArrivals(prev, next), [{ shopId: "coffee", visitors: 1 }]);
-        assert.ok(
-            lastWarnings().some((line) => line.includes("无基线的店铺 bookstore")),
-            "未知店铺必须留下 warn 日志",
-        );
-    });
+    // 注：原先这里有一条「快照里出现无基线的店铺 id → 出声」的用例，已随实现一并删掉。
+    // 同一会话内店铺清单由服务端配置固定、不会增减（改配置会改规则指纹→服务端拒旧档），
+    // 那条分支在真实协议下不可达，留着就是拿探针给它"造一个成立的现场"。
+    // 独立复核 SC-M05-QA-001 P2；与 §八-10 去死代码是同一个判断。
 
     console.log("[m05-probe] ② revision 单调守卫");
 
@@ -261,18 +273,57 @@ async function main(): Promise<void> {
         assert.ok(lastWarnings().length === 0, "空转是常态，不该告警");
     });
 
-    await checkAsync("revision 更小（乱序到达）→ 丢弃，金币不回退", async () => {
+    await checkAsync("revision 变小 ⇒ 判为服务端重建档，清基线重新应用（不永久冻结）", async () => {
+        // 本设计请求严格串行、同时只有一个在飞，**不存在"乱序到达的旧响应"**；
+        // 所以 revision 变小只可能是删档重建 / 改配置拒旧档（服务端从 1 重新计数）。
+        // 原用例把它当乱序丢弃并断言"金币保持 1500"，恰好把这条真实故障写成了期望值
+        // ——独立复核 SC-M05-QA-001 P1-2。
         const transport = new FakeTransport();
         const recorder = new Recorder();
         const store = new MallStore(transport, recorder);
         transport.mallResults.push(view(9, 1500, 5, { coffee: 5 }));
         await store.load();
-        transport.settleResults.push(result(view(8, 1280, 4, { coffee: 4 }), 1, 6));
+        const rebuilt = view(1, 1280, 0, { coffee: 0 });
+        rebuilt.rulesFingerprint = "m05-v3";
+        transport.settleResults.push(result(rebuilt, 0, 0));
         assert.strictEqual(store.tick(), "queued");
         await flush();
-        assert.strictEqual(recorder.updates.length, 1);
-        assert.strictEqual(store.view?.coins, 1500, "旧响应不得把金币拉回去");
-        assert.strictEqual(store.view?.revision, 9);
+        assert.strictEqual(recorder.updates.length, 2, "基线作废后必须重新应用，否则界面永久停在旧值");
+        assert.strictEqual(store.view?.revision, 1);
+        assert.strictEqual(store.view?.coins, 1280);
+        assert.deepStrictEqual(arrivalsOf(recorder.updates[1]), [], "新基线不做差，不凭累计值放客人");
+        assert.ok(
+            lastWarnings().some((line) => line.includes("基线作废")),
+            "换档是异常事件，必须留痕",
+        );
+    });
+
+    await checkAsync("界面回调抛异常不投毒串行链，且不提交基线", async () => {
+        // observer 是在 catch/accept 里被调的用户代码。它抛一次若让链 reject，
+        // 后续每个任务体都不再执行、inFlight 只增不减，轮询会静默永久跳过（P1-1）。
+        const transport = new FakeTransport();
+        const seen: StoreUpdate[] = [];
+        let blowUp = true;
+        const store = new MallStore(transport, {
+            onStoreUpdate: (update) => {
+                if (blowUp) {
+                    blowUp = false;
+                    throw new Error("render blew up");
+                }
+                seen.push(update);
+            },
+            onStoreError: () => undefined,
+        });
+        transport.mallResults.push(view(1, 1280, 0, { coffee: 0 }));
+        await store.load();
+        assert.strictEqual(seen.length, 0);
+        assert.strictEqual(store.view, null, "渲染失败的响应不得提交基线");
+        assert.strictEqual(store.isBusy, false, "在飞计数必须归零");
+        transport.settleResults.push(result(view(2, 1286, 1, { coffee: 1 }), 1, 6));
+        assert.strictEqual(store.tick(), "queued", "链被投毒的话这里会一直 skipped-busy");
+        await flush();
+        assert.strictEqual(seen.length, 1, "下一轮必须照常送达界面");
+        assert.strictEqual(seen[0].view.coins, 1286);
     });
 
     await checkAsync("revision 更大 → 应用，数值与 arrivals 一并交出", async () => {
@@ -430,27 +481,34 @@ async function main(): Promise<void> {
         assert.strictEqual(recorder.updates.length, 1);
     });
 
-    console.log("[m05-probe] ⑥ 验收第 1 条的数值形状");
+    console.log("[m05-probe] ⑥ 开店与首笔收益的数值形状");
 
     await checkAsync("开店 → 下一轮结算 → 一位客人归属该店、金币增加、已到店 +1", async () => {
+        // ⚠️ 本用例只验「编排层交出什么数值与 arrivals」。S2→S3 的换图、客人真的走到门口
+        //    属 MallScene/GuestStage，探针不覆盖，证据在实机（docs/M05-经营闭环.md §11.1）。
         const transport = new FakeTransport();
         const recorder = new Recorder();
         const store = new MallStore(transport, recorder);
-        // 开局：一层两铺已解锁未开业，客流未冻结（dailyVisitorCap = null）
-        transport.mallResults.push(view(1, 1280, 0, { coffee: 0, flowers: 0 }));
+        // 开局：一层两铺已解锁但**都未开业**，客流未冻结（dailyVisitorCap = null）
+        transport.mallResults.push(view(1, 1280, 0, { coffee: 0, flowers: 0 }, []));
         await store.load();
         assert.strictEqual(store.view?.dailyVisitorCap, null);
+        assert.ok(
+            store.view?.shops.every((s) => !s.prepared),
+            "开局夹具里两家店必须都是未开业，否则'开店'这一步是假的",
+        );
 
-        // 玩家点开 f1-s1（咖啡）
-        const afterPrepare = view(2, 1280, 0, { coffee: 0, flowers: 0 });
-        afterPrepare.shops[0].prepared = true;
-        transport.prepareResults.push(result(afterPrepare, 0, 0));
+        // 玩家点开 f1-s1（咖啡）：只有咖啡变已开业
+        transport.prepareResults.push(result(view(2, 1280, 0, { coffee: 0, flowers: 0 }, ["coffee"]), 0, 0));
         await store.prepare("coffee");
         await flush();
         assert.strictEqual(recorder.updates.at(-1)?.op, "prepare");
+        assert.strictEqual(recorder.updates.at(-1)?.view.shops.find((s) => s.id === "coffee")?.prepared, true);
 
         // 5 秒后第一轮结算：第一位客人到咖啡，当日上限就此冻结
-        transport.settleResults.push(result(view(3, 1286, 1, { coffee: 1, flowers: 0 }), 1, 6));
+        transport.settleResults.push(
+            result(view(3, 1286, 1, { coffee: 1, flowers: 0 }, ["coffee"]), 1, 6),
+        );
         store.tick();
         await flush();
         const update = recorder.updates.at(-1);
@@ -461,18 +519,22 @@ async function main(): Promise<void> {
         assert.strictEqual(update?.earnedCoins, 6);
     });
 
-    console.log("[m05-probe] ⑦ 验收第 4 条的数值形状");
+    console.log("[m05-probe] ⑦ 客户端侧的「不给未开业铺位画客人」");
 
-    await checkAsync("未开业铺位不出客人：只有已开业那家的 visitors 会动", async () => {
+    await checkAsync("只有 visitors 变动的店才会出客人", async () => {
+        // 口径要说清：验收第 4 条「未开业铺位不产生收益、不消耗客流」是**服务端不变量**
+        // （accrue 跳过未开业店），由 internal/game 的 Go 测试保证，探针证不了它。
+        // 探针只能证客户端这一半：**arrivals 只含 visitors 有增量的店**，
+        // 未开业店的累计值不动 ⇒ 天然不会被画上人。实机证据见 §11.1 第 4 行。
         const transport = new FakeTransport();
         const recorder = new Recorder();
         const store = new MallStore(transport, recorder);
-        transport.mallResults.push(view(1, 1280, 0, { coffee: 0, flowers: 0 }));
+        transport.mallResults.push(view(1, 1280, 0, { coffee: 0, flowers: 0 }, ["coffee"]));
         await store.load();
         // 连开三轮，客人按服务端轮转顺序只落到咖啡；花束始终未开业，累计恒为 0
         for (let round = 1; round <= 3; round += 1) {
             transport.settleResults.push(
-                result(view(1 + round, 1280 + round * 6, round, { coffee: round, flowers: 0 }), 1, 6),
+                result(view(1 + round, 1280 + round * 6, round, { coffee: round, flowers: 0 }, ["coffee"]), 1, 6),
             );
             store.tick();
             await flush();

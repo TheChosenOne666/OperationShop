@@ -47,8 +47,14 @@ export function rollNumber(label: Label, target: number, format: (n: number) => 
         .start();
 }
 
-/** 场景销毁时调用：停掉挂在中间态上的补间，防止回调打到已销毁的 Label。 */
+/**
+ * 场景销毁时调用：停掉挂在中间态上的补间，防止回调打到已销毁的 Label。
+ * 中间态必须一并从 WeakMap 丢掉——被停掉的补间不会走完收尾的 `.call`，
+ * `state.value` 会停在半路值；留着它，下次 rollNumber 就从那个半路值起滚，看着像"数字没归位"。
+ */
 export function stopRoll(label: Label): void {
     const state = rolling.get(label);
-    if (state) Tween.stopAllByTarget(state);
+    if (!state) return;
+    Tween.stopAllByTarget(state);
+    rolling.delete(label);
 }
