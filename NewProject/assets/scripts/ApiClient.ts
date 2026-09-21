@@ -61,3 +61,12 @@ export const fetchMall = () => request<MallView>("GET", "/api/v1/mall");
  * 空闲时 `changed` 为 false 且服务端不落盘——客户端不要据此判断"服务端是否活着"。
  */
 export const settle = () => request<Result>("POST", "/api/v1/mall/settle");
+
+/**
+ * 开店（把铺位从「待开业」变成「营业中」）。不花金币、幂等：
+ * 重复开店返回 `changed=false`，不重复扣费也不写存档（《系统-经营与成长》§2.4）。
+ * 铺位未解锁时服务端返回 409 `SLOT_LOCKED`。
+ * ⚠️ `shopId` 是店铺 id（`coffee`），不是铺位 id（`f1-s1`）——两套 id 传错一律 404。
+ */
+export const prepareShop = (shopId: string) =>
+    request<Result>("POST", `/api/v1/shops/${encodeURIComponent(shopId)}/prepare`);
