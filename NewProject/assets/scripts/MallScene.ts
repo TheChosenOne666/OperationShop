@@ -12,7 +12,7 @@
 //
 // ⚠️ 渲染必须是**同步且幂等**的：本场景每 5 秒重渲染一次，若渲染里还夹着异步取图，
 //    回调会在多轮之间堆积、顺序不可控。所以启动时一次性预加载全部帧，之后渲染只读缓存。
-import { _decorator, assetManager, Bundle, Component, EffectAsset, Label, Material, Node, Sprite, SpriteFrame } from "cc";
+import { _decorator, assetManager, Bundle, Component, EffectAsset, game, Game, Label, Material, Node, Sprite, SpriteFrame } from "cc";
 import { ApiError, fetchConfig, fetchMall, prepareShop, settle } from "./ApiClient";
 import type { Config, MallView, SlotConfig, ShopView } from "./ApiTypes";
 import { MallStore } from "./MallStore";
@@ -107,12 +107,15 @@ export class MallScene extends Component {
             });
             await this.store.load();
             this.startPolling(cfg.visitorIntervalSeconds);
+            this.bindLifecycle();
         } catch (err) {
             this.onFatal(err);
         }
     }
 
     protected onDestroy(): void {
+        game.off(Game.EVENT_HIDE, this.onGameHide, this);
+        game.off(Game.EVENT_SHOW, this.onGameShow, this);
         this.unschedule(this.onTick);
         this.guests?.dispose();
         // 补间挂在中间态对象上；场景先没的话 onUpdate 会打到已失效的 Label
@@ -176,6 +179,25 @@ export class MallScene extends Component {
 
     private onTick = (): void => {
         this.store?.tick();
+    };
+
+    /**
+     * 切后台停轮询、回前台立即取权威状态（B3.6）。
+     * 引擎收到平台 hide 时自己也会 pauseByEngine 停主循环，所以这里只管"还要不要发请求"。
+     * ⚠️ 引擎文档明写 WEB 平台这两个事件不保证 100% 触发（`cc.d.ts` 里 Game.EVENT_HIDE 的注释），
+     *    因此真机/开发者工具的复验才算结案，见 docs/M05-经营闭环.md §9-⑤。
+     */
+    private bindLifecycle(): void {
+        game.on(Game.EVENT_HIDE, this.onGameHide, this);
+        game.on(Game.EVENT_SHOW, this.onGameShow, this);
+    }
+
+    private onGameHide = (): void => {
+        this.store?.pause();
+    };
+
+    private onGameShow = (): void => {
+        void this.store?.resume();
     };
 
     // ---------- 开店交互 ----------

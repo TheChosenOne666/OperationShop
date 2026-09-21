@@ -17,6 +17,10 @@
 //                               整屏一张 1MB 且看不出细节，抓 400ms 补间必须截小块
 //   burst:<名字>:<张数>:<间隔毫秒>  连拍，每张报字节数——
 //                               数值变了 PNG 字节数就会变，据此定位该看哪几帧，不必逐张开
+//   visibility:<hidden|visible> 改 document.hidden 并派发 visibilitychange，
+//                               驱动引擎的 Game.EVENT_HIDE/EVENT_SHOW。
+//                               ⚠️ 这是**合成触发**，不等于真后台（rAF 没被浏览器掐断），
+//                               真机/开发者工具复验才算结案
 //   wait:<秒>                   等待
 //   reload                      刷新页面（等价于「完全退出小游戏再进入」）
 // 例：
@@ -258,6 +262,19 @@ async function main() {
             } else if (kind === "clip") {
                 clipDesign = rest.map(Number);
                 console.log(`  ✂️ 后续截图裁剪到设计区域 中心(${clipDesign[0]},${clipDesign[1]}) ${clipDesign[2]}×${clipDesign[3]}`);
+            } else if (kind === "visibility") {
+                const state = rest.join(":");
+                const hidden = state === "hidden";
+                if (state !== "hidden" && state !== "visible") throw new Error(`visibility 只接受 hidden/visible，收到 ${state}`);
+                await evaluate(`(() => {
+                    Object.defineProperty(document, 'hidden', { configurable: true, get: () => ${hidden} });
+                    Object.defineProperty(document, 'visibilityState', {
+                        configurable: true, get: () => ${hidden ? "'hidden'" : "'visible'"},
+                    });
+                    document.dispatchEvent(new Event('visibilitychange'));
+                    return 1;
+                })()`);
+                console.log(`  🌓 合成 visibilitychange → ${state}（引擎会 emit EVENT_${hidden ? "HIDE" : "SHOW"}）`);
             } else if (kind === "wait") {
                 const secs = Number(rest.join(":"));
                 console.log(`  ⏳ 等待 ${secs}s`);
