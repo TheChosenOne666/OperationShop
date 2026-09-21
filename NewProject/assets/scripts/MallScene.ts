@@ -17,6 +17,8 @@ import { ApiError, fetchConfig, fetchMall, prepareShop, settle } from "./ApiClie
 import type { Config, MallView, SlotConfig, ShopView } from "./ApiTypes";
 import { MallStore } from "./MallStore";
 import type { StoreOp, StoreUpdate } from "./MallStore";
+import { GuestStage } from "./GuestStage";
+import type { GuestArt } from "./GuestStage";
 import { rollNumber, stopRoll } from "./NumberRoll";
 
 const { ccclass } = _decorator;
@@ -54,6 +56,17 @@ const SLOT_OVERLAY: ReadonlyArray<readonly [string, string]> = [
     ["Lock", "state/ico_lock/spriteFrame"],
 ];
 
+/**
+ * M05 表演层要用的图：客人三视图在分包 mall_art，飘字金币在主包内 ui_main
+ * （`ico_coin` 2026-09-21 从工程外 `assets/_staging/` 挪回来，依据《美术圣经》第 414 行）。
+ */
+const GUEST_ART: Readonly<Record<keyof GuestArt, readonly [string, string]>> = {
+    side: [ART_BUNDLE, "chr/chr_guest_a_side/spriteFrame"],
+    front: [ART_BUNDLE, "chr/chr_guest_a_front/spriteFrame"],
+    back: [ART_BUNDLE, "chr/chr_guest_a_back/spriteFrame"],
+    coin: [UI_BUNDLE, "ico/ico_coin/spriteFrame"],
+};
+
 /** 帧缓存的键：同名帧可能分属两个 Bundle，必须带上前缀。 */
 function frameKey(bundleName: string, framePath: string): string {
     return `${bundleName}:${framePath}`;
@@ -66,6 +79,7 @@ export class MallScene extends Component {
     private config: Config | null = null;
     private effect: EffectAsset | null = null;
     private store: MallStore | null = null;
+    private guests: GuestStage | null = null;
     /** 招牌原文。错误横幅要占这块地方，成功后得还原回去。 */
     private marqueeText = "";
 
@@ -84,6 +98,7 @@ export class MallScene extends Component {
             await Promise.all([this.loadSlotEffect(), this.preloadFrames(cfg)]);
             this.applyStaticArt();
             this.bindSlotInput(cfg);
+            this.buildGuestStage(cfg);
 
             // 传输层直接复用 ApiClient 的三个函数；界面层就是本组件。
             this.store = new MallStore({ fetchMall, settle, prepareShop }, {
@@ -99,6 +114,7 @@ export class MallScene extends Component {
 
     protected onDestroy(): void {
         this.unschedule(this.onTick);
+        this.guests?.dispose();
         // 补间挂在中间态对象上；场景先没的话 onUpdate 会打到已失效的 Label
         for (const path of ["Hud/CoinLabel", "Hud/VisitorLabel"]) {
             const label = this.node.getChildByPath(path)?.getComponent(Label);
@@ -116,6 +132,7 @@ export class MallScene extends Component {
         if (!this.isValid) return;
         this.render(update.view);
         this.clearError();
+        this.guests?.spawn(update);
         // 注意口径：MallStore 那条日志的「本轮到店」是**人数**，这里的是**几家店**，别说成同一个量。
         console.log(`[m05] 界面已更新 revision=${update.view.revision} 来源=${update.op} 到店涉及 ${update.arrivals.length} 家`);
     }
@@ -194,6 +211,43 @@ export class MallScene extends Component {
         void this.store?.prepare(slot.shopId);
     }
 
+    // ---------- 客人表演 ----------
+
+    /**
+     * 建表演层。四张图缺任何一张就整层不启用——
+     * 缺件的客人会画成一个空节点，比不画更难排查；素材齐了才上场，且缺件日志已在预加载时出过。
+     */
+    private buildGuestStage(cfg: Config): void {
+        const layer = this.node.getChildByPath("GuestLayer");
+        if (!layer) {
+            console.error("[m05] 场景里没有 GuestLayer，客人无法上场");
+            return;
+        }
+        const pick = (key: keyof GuestArt): SpriteFrame | null => {
+            const [bundleName, framePath] = GUEST_ART[key];
+            return this.frames.get(frameKey(bundleName, framePath)) ?? null;
+        };
+        const picked: Record<keyof GuestArt, SpriteFrame | null> = {
+            side: pick("side"),
+            front: pick("front"),
+            back: pick("back"),
+            coin: pick("coin"),
+        };
+        const missing = (Object.keys(picked) as Array<keyof GuestArt>).filter((key) => !picked[key]);
+        if (missing.length) {
+            console.error(`[m05] 表演层缺图 ${missing.join("/")}，本轮不启用客人走位`);
+            return;
+        }
+
+        const slots = new Map<string, Node>();
+        for (const slot of cfg.slots) {
+            const found = this.findSlot(slot.id);
+            if (found) slots.set(slot.shopId, found.root);
+        }
+        this.guests = new GuestStage(layer, picked as GuestArt, slots);
+        console.log(`[m05] 表演层就绪，客人可映射到 ${slots.size} 家店铺`);
+    }
+
     // ---------- 资源 ----------
 
     /**
@@ -240,6 +294,9 @@ export class MallScene extends Component {
         for (const slot of cfg.slots) {
             wanted.push([ART_BUNDLE, shopArtPath(slot.shopId)]);
             wanted.push([ART_BUNDLE, emptyArtPath(slot.floor)]);
+        }
+        for (const key of Object.keys(GUEST_ART) as Array<keyof GuestArt>) {
+            wanted.push(GUEST_ART[key]);
         }
         return Promise.all(wanted.map(([bundleName, framePath]) => this.loadFrame(bundleName, framePath)))
             .then(() => undefined);
