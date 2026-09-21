@@ -13,6 +13,10 @@
 //   click:<标签>:<dx>:<dy>      点击设计坐标（Canvas 中心系，x 右正 / y 上正）
 //   probe:<标签>:<dx>:<dy>      同 click，但额外回报浏览器侧收到的事件计数与 canvas 矩形——
 //                               点击没反应时用它判断事件有没有送到页面、坐标算错没算错
+//   clip:<dx>:<dy>:<w>:<h>      之后所有截图只截这块设计坐标区域（中心 + 宽高）。
+//                               整屏一张 1MB 且看不出细节，抓 400ms 补间必须截小块
+//   burst:<名字>:<张数>:<间隔毫秒>  连拍，每张报字节数——
+//                               数值变了 PNG 字节数就会变，据此定位该看哪几帧，不必逐张开
 //   wait:<秒>                   等待
 //   reload                      刷新页面（等价于「完全退出小游戏再进入」）
 // 例：
@@ -198,20 +202,62 @@ async function main() {
             return at;
         }
 
+        /** 非空时后续截图只截这块设计坐标区域（中心 + 宽高）。 */
+        let clipDesign = null;
+
+        async function canvasRect() {
+            const value = await evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect();
+                return JSON.stringify({ l: r.left, t: r.top, w: r.width, h: r.height }); })()`);
+            return JSON.parse(value);
+        }
+
+        /** 把设计坐标区域换算成 CDP 的 CSS 像素裁剪框（同样以 canvas 中心为原点）。 */
+        async function toClip() {
+            const rect = await canvasRect();
+            const [dx, dy, w, h] = clipDesign;
+            const scale = rect.h / DESIGN.height;
+            return {
+                x: rect.l + rect.w / 2 + (dx - w / 2) * scale,
+                y: rect.t + rect.h / 2 - (dy + h / 2) * scale,
+                width: w * scale,
+                height: h * scale,
+                scale: 1,
+            };
+        }
+
+        /** 截一张图，返回字节数——连拍时靠它定位"哪一帧数值变了"，不必逐张开图。 */
         async function shot(name) {
-            const { data } = await cdp.send("Page.captureScreenshot", {
-                format: "png", captureBeyondViewport: true,
-            });
+            const params = { format: "png" };
+            if (clipDesign) params.clip = await toClip();
+            else params.captureBeyondViewport = true;
+            const { data } = await cdp.send("Page.captureScreenshot", params);
             const file = `${outDir}/${name}.png`;
-            writeFileSync(file, Buffer.from(data, "base64"));
-            console.log(`  📷 ${file}`);
+            const bytes = Buffer.from(data, "base64");
+            writeFileSync(file, bytes);
+            return { file, size: bytes.length };
         }
 
         console.log(`[m05-drive] 打开 ${url}`);
         for (const step of steps) {
             const [kind, ...rest] = step.split(":");
             if (kind === "shot") {
-                await shot(rest.join(":"));
+                const { file, size } = await shot(rest.join(":"));
+                console.log(`  📷 ${file}（${size} 字节）`);
+            } else if (kind === "burst") {
+                const [prefix, count, intervalMs] = rest;
+                const sizes = [];
+                for (let i = 0; i < Number(count); i += 1) {
+                    const { size } = await shot(`${prefix}-${String(i).padStart(2, "0")}`);
+                    sizes.push(size);
+                    await sleep(Number(intervalMs));
+                }
+                console.log(`  🎞 连拍 ${sizes.length} 张：${sizes.join(",")}`);
+                // 字节数变化 ≈ 画面内容变了（数字换了字形），指出该看哪几帧
+                const changed = sizes.map((s, i) => (i && s !== sizes[i - 1] ? i : -1)).filter((i) => i > 0);
+                console.log(`     字节数变化的帧号：${changed.length ? changed.join(",") : "无（这段时间画面没变）"}`);
+            } else if (kind === "clip") {
+                clipDesign = rest.map(Number);
+                console.log(`  ✂️ 后续截图裁剪到设计区域 中心(${clipDesign[0]},${clipDesign[1]}) ${clipDesign[2]}×${clipDesign[3]}`);
             } else if (kind === "wait") {
                 const secs = Number(rest.join(":"));
                 console.log(`  ⏳ 等待 ${secs}s`);

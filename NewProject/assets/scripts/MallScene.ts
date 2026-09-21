@@ -17,6 +17,7 @@ import { ApiError, fetchConfig, fetchMall, prepareShop, settle } from "./ApiClie
 import type { Config, MallView, SlotConfig, ShopView } from "./ApiTypes";
 import { MallStore } from "./MallStore";
 import type { StoreOp, StoreUpdate } from "./MallStore";
+import { rollNumber, stopRoll } from "./NumberRoll";
 
 const { ccclass } = _decorator;
 
@@ -98,6 +99,11 @@ export class MallScene extends Component {
 
     protected onDestroy(): void {
         this.unschedule(this.onTick);
+        // 补间挂在中间态对象上；场景先没的话 onUpdate 会打到已失效的 Label
+        for (const path of ["Hud/CoinLabel", "Hud/VisitorLabel"]) {
+            const label = this.node.getChildByPath(path)?.getComponent(Label);
+            if (label) stopRoll(label);
+        }
     }
 
     // ---------- 服务端状态 ----------
@@ -312,16 +318,20 @@ export class MallScene extends Component {
         }
     }
 
-    /** HUD 五槽：金币图标 + 金币数值 + 3 个导航按钮 + 客流。数值全部来自服务端。 */
+    /**
+     * HUD 五槽：金币图标 + 金币数值 + 3 个导航按钮 + 客流。数值全部来自服务端。
+     * 用滚动而非直接赋值（《美术圣经》第 848 行 ≤400ms ease-out）：
+     * 金币每 5 秒才涨几点，直接跳会让玩家以为是界面自己在动。
+     */
     private renderHud(view: MallView): void {
         const coin = this.node.getChildByPath("Hud/CoinLabel")?.getComponent(Label);
-        if (coin) coin.string = String(view.coins);
+        if (coin) rollNumber(coin, view.coins);
 
         const visitor = this.node.getChildByPath("Hud/VisitorLabel")?.getComponent(Label);
         if (visitor) {
             // dailyVisitorCap 为 null 表示当天还没冻结，显示 — 而不是假的 0（与 Boot 同口径）。
             const cap = view.dailyVisitorCap === null ? "—" : String(view.dailyVisitorCap);
-            visitor.string = `${view.visitorsServed}/${cap}`;
+            rollNumber(visitor, view.visitorsServed, (n) => `${n}/${cap}`);
         }
     }
 
