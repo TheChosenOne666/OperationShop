@@ -1,15 +1,22 @@
-// Mall 场景的主控：把服务端快照映射到 5 个铺位与底部 HUD，美术全部按路径从 Bundle 异步取。
+// Mall 场景的主控：把服务端快照映射到 5 个铺位与底部 HUD，并驱动 M05 的经营闭环。
 //
 // 沿用的硬约束：
 //   ADR 0001 服务端权威 / 客户端零计算 —— 只读服务端给的字段，不推算单价、不推算解锁价。
+//       什么时候问服务端、响应信不信、这轮谁来了，全部委托给 MallStore（编排层）。
+//   ADR 0004 数值外置 —— 轮询间隔取 config.visitorIntervalSeconds，不在客户端写死秒数。
 //   架构现状 §10 渲染约定 —— 三态 S1/S2/S3 用「同一张贴图 + 材质自发光档位 + 独立遮挡子节点」表达，
 //                                 不预烘多套 PNG；自发光两档（S1 暗 0.30 / S2·S3 亮 1.00）。
 //   草案 B3.4 分包策略 —— 铺位立绘与空铺底图在分包 mall_art，HUD 常驻件在主包内 Bundle ui_main。
 //   为什么全走路径加载：非 resources/Bundle 目录的资源不支持按路径加载，且手写场景里写 uuid
 //   资产引用最容易错；把两批素材都配成 Bundle 后，场景只留结构，取图全在代码里，可复现。
+//
+// ⚠️ 渲染必须是**同步且幂等**的：本场景每 5 秒重渲染一次，若渲染里还夹着异步取图，
+//    回调会在多轮之间堆积、顺序不可控。所以启动时一次性预加载全部帧，之后渲染只读缓存。
 import { _decorator, assetManager, Bundle, Component, EffectAsset, Label, Material, Node, Sprite, SpriteFrame } from "cc";
-import { ApiError, fetchConfig, fetchMall } from "./ApiClient";
-import type { Config, MallView } from "./ApiTypes";
+import { ApiError, fetchConfig, fetchMall, prepareShop, settle } from "./ApiClient";
+import type { Config, MallView, SlotConfig, ShopView } from "./ApiTypes";
+import { MallStore } from "./MallStore";
+import type { StoreOp, StoreUpdate } from "./MallStore";
 
 const { ccclass } = _decorator;
 
@@ -46,33 +53,142 @@ const SLOT_OVERLAY: ReadonlyArray<readonly [string, string]> = [
     ["Lock", "state/ico_lock/spriteFrame"],
 ];
 
+/** 帧缓存的键：同名帧可能分属两个 Bundle，必须带上前缀。 */
+function frameKey(bundleName: string, framePath: string): string {
+    return `${bundleName}:${framePath}`;
+}
+
 @ccclass("MallScene")
 export class MallScene extends Component {
     private bundles = new Map<string, Bundle>();
+    private frames = new Map<string, SpriteFrame>();
     private config: Config | null = null;
     private effect: EffectAsset | null = null;
+    private store: MallStore | null = null;
+    /** 招牌原文。错误横幅要占这块地方，成功后得还原回去。 */
+    private marqueeText = "";
 
     async start(): Promise<void> {
-        console.log("[m04] Mall 场景启动，准备加载 Bundle", ART_BUNDLE, UI_BUNDLE);
+        console.log("[m05] Mall 场景启动，准备加载 Bundle", ART_BUNDLE, UI_BUNDLE);
         try {
-            const [art, ui, cfg, mall] = await Promise.all([
+            const [art, ui, cfg] = await Promise.all([
                 this.loadBundle(ART_BUNDLE),
                 this.loadBundle(UI_BUNDLE),
                 fetchConfig(),
-                fetchMall(),
             ]);
             this.bundles.set(ART_BUNDLE, art);
             this.bundles.set(UI_BUNDLE, ui);
             this.config = cfg;
-            await this.loadSlotEffect();
+            this.marqueeText = this.node.getChildByPath("Marquee")?.getComponent(Label)?.string ?? "";
+            await Promise.all([this.loadSlotEffect(), this.preloadFrames(cfg)]);
             this.applyStaticArt();
-            this.renderSlots(mall);
-            this.renderHud(mall);
-            console.log(`[m04] Mall 渲染完成 revision=${mall.revision} 铺位=${mall.shops.length}`);
+            this.bindSlotInput(cfg);
+
+            // 传输层直接复用 ApiClient 的三个函数；界面层就是本组件。
+            this.store = new MallStore({ fetchMall, settle, prepareShop }, {
+                onStoreUpdate: (update) => this.onStoreUpdate(update),
+                onStoreError: (code, op) => this.onStoreError(code, op),
+            });
+            await this.store.load();
+            this.startPolling(cfg.visitorIntervalSeconds);
         } catch (err) {
-            this.showError(err);
+            this.onFatal(err);
         }
     }
+
+    protected onDestroy(): void {
+        this.unschedule(this.onTick);
+    }
+
+    // ---------- 服务端状态 ----------
+
+    /**
+     * 一次成功的响应：重渲染 + 清掉错误横幅。
+     * 在飞请求可能在场景销毁后才回来，所以先判 isValid，不去碰已销毁的节点。
+     */
+    private onStoreUpdate(update: StoreUpdate): void {
+        if (!this.isValid) return;
+        this.render(update.view);
+        this.clearError();
+        // 注意口径：MallStore 那条日志的「本轮到店」是**人数**，这里的是**几家店**，别说成同一个量。
+        console.log(`[m05] 界面已更新 revision=${update.view.revision} 来源=${update.op} 到店涉及 ${update.arrivals.length} 家`);
+    }
+
+    /**
+     * 一次失败的响应：**只挂横幅，不动数值**——金币与客流保留最后一次成功值。
+     * 轮询模式下失败是常态化的瞬时事件，盖掉数字本身就会被看成"金币跳变"（验收第 3 条）。
+     */
+    private onStoreError(code: string, op: StoreOp): void {
+        if (!this.isValid) return;
+        const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
+        if (!marquee) return;
+        // 只按稳定错误码分支，不匹配服务端的中文提示（ADR 0001 同口径）。
+        const transport = code === "NETWORK" || code === "TIMEOUT" || code.indexOf("HTTP_") === 0;
+        marquee.string = `${transport ? "连接中断" : "操作失败"} ${code}`;
+        console.error(`[m05] ${op} 失败（${code}），横幅提示已挂出，数值保留最后一次成功值`);
+    }
+
+    private clearError(): void {
+        const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
+        if (marquee && this.marqueeText) marquee.string = this.marqueeText;
+    }
+
+    /** 启动阶段就失败（Bundle 或 config 取不到）：这时还没有任何权威数值可保留。 */
+    private onFatal(err: unknown): void {
+        const code = err instanceof ApiError ? err.code : "UNKNOWN";
+        const label = this.node.getChildByPath("Hud/CoinLabel")?.getComponent(Label);
+        if (label) label.string = `读取失败 ${code}`;
+        console.error("[m05] Mall 启动失败", err);
+    }
+
+    /**
+     * 轮询节拍。间隔跟配置走而不是写死 5：
+     * B3.6 的 5 秒与 visitorIntervalSeconds 初版同值，ADR 0001 的要求是「将请求量与结算间隔对齐」，
+     * 所以调数值时两边应当一起动。下界由服务端保证（`internal/game/config.go:77` 要求 1–3600）。
+     */
+    private startPolling(intervalSeconds: number): void {
+        this.schedule(this.onTick, intervalSeconds);
+        console.log(`[m05] 开始轮询，每 ${intervalSeconds} 秒一次`);
+    }
+
+    private onTick = (): void => {
+        this.store?.tick();
+    };
+
+    // ---------- 开店交互 ----------
+
+    /**
+     * M05 的最小开店入口：点「待开业」铺位直接开店。
+     * 依据《系统-经营与成长》§2.4——开店不花金币、幂等，没有需要玩家确认的代价，
+     * 所以不做确认弹窗。设计稿里的正式入口（经营页金色「开业」按钮）属 M06。
+     */
+    private bindSlotInput(cfg: Config): void {
+        for (const slot of cfg.slots) {
+            const found = this.findSlot(slot.id);
+            if (!found) {
+                console.error(`[m05] 场景里找不到铺位节点 ${slot.id}，无法绑定点击`);
+                continue;
+            }
+            found.root.on(Node.EventType.TOUCH_END, () => this.onSlotTouched(slot), this);
+        }
+    }
+
+    private onSlotTouched(slot: SlotConfig): void {
+        const view = this.store?.view;
+        if (!view) {
+            console.log(`[m05] 铺位 ${slot.id} 被点击，但快照尚未就绪，忽略`);
+            return;
+        }
+        const state = this.slotStateOf(slot, view);
+        if (state !== "S2") {
+            // S1 的解锁入口属 M06 布局页，S3 的店铺详情属 M06；M05 不做提示 UI，只留痕。
+            console.log(`[m05] 铺位 ${slot.id} 当前是 ${state}，M05 只在「待开业」上响应开店`);
+            return;
+        }
+        void this.store?.prepare(slot.shopId);
+    }
+
+    // ---------- 资源 ----------
 
     /**
      * 取三态着色器。取不到**不阻断渲染**：铺位仍要靠 Veil/Lock/文字表达状态，
@@ -84,7 +200,7 @@ export class MallScene extends Component {
         return new Promise((resolve) => {
             bundle.load(EFFECT_PATH, EffectAsset, (err, asset) => {
                 if (err || !asset) {
-                    console.error(`[m04] 三态着色器 ${EFFECT_PATH} 取不到，铺位将不压暗`, err);
+                    console.error(`[m05] 三态着色器 ${EFFECT_PATH} 取不到，铺位将不压暗`, err);
                 } else {
                     this.effect = asset;
                 }
@@ -98,7 +214,7 @@ export class MallScene extends Component {
         return new Promise((resolve, reject) => {
             assetManager.loadBundle(name, (err, bundle) => {
                 if (err || !bundle) {
-                    console.error(`[m04] Bundle ${name} 加载失败`, err);
+                    console.error(`[m05] Bundle ${name} 加载失败`, err);
                     reject(new ApiError("BUNDLE_LOAD_FAILED", 0));
                     return;
                 }
@@ -107,79 +223,121 @@ export class MallScene extends Component {
         });
     }
 
-    /** 取 SpriteFrame 并挂到指定路径的 Sprite 上；缺件只报日志，不影响其他节点。 */
-    private applyFrame(nodePath: string, bundleName: string, framePath: string): void {
+    /**
+     * 启动时一次性取回全部会用到的帧，之后渲染纯同步。
+     * 清单 = 常驻件 + 遮挡件 + 每个铺位的「立绘」与「该层空铺底图」（三态覆盖完）。
+     */
+    private preloadFrames(cfg: Config): Promise<void> {
+        const wanted: Array<readonly [string, string]> = [];
+        for (const [, bundleName, framePath] of STATIC_ART) wanted.push([bundleName, framePath]);
+        for (const [, framePath] of SLOT_OVERLAY) wanted.push([UI_BUNDLE, framePath]);
+        for (const slot of cfg.slots) {
+            wanted.push([ART_BUNDLE, shopArtPath(slot.shopId)]);
+            wanted.push([ART_BUNDLE, emptyArtPath(slot.floor)]);
+        }
+        return Promise.all(wanted.map(([bundleName, framePath]) => this.loadFrame(bundleName, framePath)))
+            .then(() => undefined);
+    }
+
+    private loadFrame(bundleName: string, framePath: string): Promise<void> {
+        const key = frameKey(bundleName, framePath);
+        if (this.frames.has(key)) return Promise.resolve();
+        const bundle = this.bundles.get(bundleName);
+        if (!bundle) return Promise.resolve();
+        return new Promise((resolve) => {
+            bundle.load(framePath, SpriteFrame, (err, frame) => {
+                if (err || !frame) {
+                    // 素材目前是占位图，真素材替换前缺件属预期；这里必须出声，否则以后无从排查。
+                    console.error(`[m05] ${bundleName} 内取不到 ${framePath}`, err);
+                } else {
+                    this.frames.set(key, frame);
+                }
+                resolve();
+            });
+        });
+    }
+
+    /** 从缓存取帧挂到指定路径的 Sprite 上。缺件在预加载时已出过声，这里不重复刷日志。 */
+    private setFrame(nodePath: string, bundleName: string, framePath: string): void {
         const sprite = this.node.getChildByPath(nodePath)?.getComponent(Sprite);
         if (!sprite) {
-            console.error(`[m04] 场景里找不到带 Sprite 的节点 ${nodePath}`);
+            console.error(`[m05] 场景里找不到带 Sprite 的节点 ${nodePath}`);
             return;
         }
-        const bundle = this.bundles.get(bundleName);
-        if (!bundle) return;
-        bundle.load(framePath, SpriteFrame, (err, frame) => {
-            if (err || !frame) {
-                // 素材目前是占位图，真素材替换前缺件属预期；这里必须出声，否则以后无从排查。
-                console.error(`[m04] ${bundleName} 内取不到 ${framePath}`, err);
-                return;
-            }
-            sprite.spriteFrame = frame;
-        });
+        const frame = this.frames.get(frameKey(bundleName, framePath));
+        if (frame) sprite.spriteFrame = frame;
     }
 
     private applyStaticArt(): void {
         for (const [nodePath, bundleName, framePath] of STATIC_ART) {
-            this.applyFrame(nodePath, bundleName, framePath);
+            this.setFrame(nodePath, bundleName, framePath);
         }
     }
 
-    private renderSlots(mall: MallView): void {
+    // ---------- 渲染 ----------
+
+    /** 一次幂等重渲染：同一份快照渲染两次结果一致，且不触发任何异步加载。 */
+    private render(view: MallView): void {
+        this.renderSlots(view);
+        this.renderHud(view);
+    }
+
+    private renderSlots(view: MallView): void {
         if (!this.config) return;
         for (const slot of this.config.slots) {
             const found = this.findSlot(slot.id);
             if (!found) {
-                console.error(`[m04] 场景里找不到铺位节点 ${slot.id}`);
+                console.error(`[m05] 场景里找不到铺位节点 ${slot.id}`);
                 continue;
             }
             const { root, path } = found;
-            const shop = mall.shops.find((s) => s.id === slot.shopId) ?? null;
-            const unlocked = mall.unlockedSlots.indexOf(slot.id) >= 0;
-            const state: SlotState = !unlocked ? "S1" : shop && shop.prepared ? "S3" : "S2";
+            const shop = view.shops.find((s) => s.id === slot.shopId) ?? null;
+            const state = this.slotStateOf(slot, view);
 
             // S3 换成立绘；S1/S2 都显示该楼层的空铺底图（B3.5，也是 M04 验收第 3 条）。
-            const frame = state === "S3"
-                ? `shop/shop_${slot.shopId}_open/spriteFrame`
-                : `slt/slt_f${slot.floor}_empty/spriteFrame`;
-            this.applyFrame(`${path}/Art`, ART_BUNDLE, frame);
+            this.setFrame(
+                `${path}/Art`,
+                ART_BUNDLE,
+                state === "S3" ? shopArtPath(slot.shopId) : emptyArtPath(slot.floor),
+            );
             for (const [child, overlayPath] of SLOT_OVERLAY) {
-                this.applyFrame(`${path}/${child}`, UI_BUNDLE, overlayPath);
+                this.setFrame(`${path}/${child}`, UI_BUNDLE, overlayPath);
                 const overlay = root.getChildByName(child);
                 if (overlay) overlay.active = state === "S1";
             }
             this.applyEmissive(root, state === "S1" ? EMISSIVE_DIM : EMISSIVE_FULL);
 
             const tag = root.getChildByName("Tag")?.getComponent(Label);
-            if (tag) {
-                if (state === "S3" && shop) tag.string = shop.name;
-                else if (state === "S2") tag.string = "待开业";
-                else tag.string = mall.nextSlotId === slot.id ? `解锁 $${mall.nextUnlockCost}` : "未开放";
-            }
+            if (tag) tag.string = this.tagOf(slot, view, state, shop);
         }
     }
 
     /** HUD 五槽：金币图标 + 金币数值 + 3 个导航按钮 + 客流。数值全部来自服务端。 */
-    private renderHud(mall: MallView): void {
+    private renderHud(view: MallView): void {
         const coin = this.node.getChildByPath("Hud/CoinLabel")?.getComponent(Label);
-        if (coin) coin.string = String(mall.coins);
+        if (coin) coin.string = String(view.coins);
 
         const visitor = this.node.getChildByPath("Hud/VisitorLabel")?.getComponent(Label);
         if (visitor) {
             // dailyVisitorCap 为 null 表示当天还没冻结，显示 — 而不是假的 0（与 Boot 同口径）。
-            const cap = mall.dailyVisitorCap === null ? "—" : String(mall.dailyVisitorCap);
-            visitor.string = `${mall.visitorsServed}/${cap}`;
+            const cap = view.dailyVisitorCap === null ? "—" : String(view.dailyVisitorCap);
+            visitor.string = `${view.visitorsServed}/${cap}`;
         }
     }
 
-    /** 铺位挂在两层之一，返回节点与它相对 Canvas 的路径（按路径加载素材要用全路径）。 */
+    private slotStateOf(slot: SlotConfig, view: MallView): SlotState {
+        if (view.unlockedSlots.indexOf(slot.id) < 0) return "S1";
+        const shop = view.shops.find((s) => s.id === slot.shopId);
+        return shop && shop.prepared ? "S3" : "S2";
+    }
+
+    private tagOf(slot: SlotConfig, view: MallView, state: SlotState, shop: ShopView | null): string {
+        if (state === "S3" && shop) return shop.name;
+        if (state === "S2") return "待开业";
+        return view.nextSlotId === slot.id ? `解锁 $${view.nextUnlockCost}` : "未开放";
+    }
+
+    /** 铺位挂在两层之一，返回节点与它相对 Canvas 的路径（按路径取节点要用全路径）。 */
     private findSlot(slotId: string): { root: Node; path: string } | null {
         for (const floor of ["Floor1", "Floor2"]) {
             const path = `${floor}/${slotId}`;
@@ -205,11 +363,14 @@ export class MallScene extends Component {
         }
         sprite.customMaterial.setProperty("u_emissive", value);
     }
+}
 
-    private showError(err: unknown): void {
-        const code = err instanceof ApiError ? err.code : "UNKNOWN";
-        const label = this.node.getChildByPath("Hud/CoinLabel")?.getComponent(Label);
-        if (label) label.string = `读取失败 ${code}`;
-        console.error("[m04] Mall 渲染失败", err);
-    }
+/** S3 营业中用的店铺立绘。 */
+function shopArtPath(shopId: string): string {
+    return `shop/shop_${shopId}_open/spriteFrame`;
+}
+
+/** S1/S2 用的该层空铺底图。 */
+function emptyArtPath(floor: number): string {
+    return `slt/slt_f${floor}_empty/spriteFrame`;
 }
