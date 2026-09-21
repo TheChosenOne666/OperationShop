@@ -35,6 +35,9 @@ const EFFECT_PATH = "effects/slot-emissive";
 const EMISSIVE_DIM = 0.3;
 const EMISSIVE_FULL = 1.0;
 
+/** 错误横幅在招牌上停留多久。取 3 秒：短过一次轮询间隔，不会盖住下一次正常反馈。 */
+const ERROR_BANNER_SECONDS = 3;
+
 /** 三态判据（服务端已给够）：unlockedSlots 不含该铺 ⇒ S1；含而 prepared=false ⇒ S2；prepared=true ⇒ S3。 */
 type SlotState = "S1" | "S2" | "S3";
 
@@ -113,12 +116,17 @@ export class MallScene extends Component {
         }
     }
 
+    /**
+     * 只清引擎**不会**替我清的东西：
+     *   · `game.on` 的监听挂在 game 这个 EventTarget 上，与节点生命周期无关；
+     *   · 补间的目标是 Node / UIOpacity / 中间态普通对象，走的是 ActionManager，不是本组件的调度器。
+     * 而 `schedule` / `scheduleOnce` 的回调不必在这里 unschedule——引擎在 `_onPreDestroy()`
+     * 里、`onDestroy` 之前就已经 `unscheduleAllCallbacks()`（`scene-graph/component.ts:407`）。
+     */
     protected onDestroy(): void {
         game.off(Game.EVENT_HIDE, this.onGameHide, this);
         game.off(Game.EVENT_SHOW, this.onGameShow, this);
-        this.unschedule(this.onTick);
         this.guests?.dispose();
-        // 补间挂在中间态对象上；场景先没的话 onUpdate 会打到已失效的 Label
         for (const path of ["Hud/CoinLabel", "Hud/VisitorLabel"]) {
             const label = this.node.getChildByPath(path)?.getComponent(Label);
             if (label) stopRoll(label);
@@ -151,13 +159,22 @@ export class MallScene extends Component {
         // 只按稳定错误码分支，不匹配服务端的中文提示（ADR 0001 同口径）。
         const transport = code === "NETWORK" || code === "TIMEOUT" || code.indexOf("HTTP_") === 0;
         marquee.string = `${transport ? "连接中断" : "操作失败"} ${code}`;
-        console.error(`[m05] ${op} 失败（${code}），横幅提示已挂出，数值保留最后一次成功值`);
+        // 定时自清，不能只等"下一次成功"来清：见 clearError 的注释
+        this.unschedule(this.clearError);
+        this.scheduleOnce(this.clearError, ERROR_BANNER_SECONDS);
+        console.error(`[m05] ${op} 失败（${code}），横幅挂 ${ERROR_BANNER_SECONDS} 秒，数值保留最后一次成功值`);
     }
 
-    private clearError(): void {
+    /**
+     * 还原招牌。
+     * ⚠️ 必须能**定时自清**：空闲时的 settle 响应会被 revision 守卫丢弃、根本不触发 onStoreUpdate，
+     *    只靠"下一次成功更新"来清的话，当日客流耗尽后错误就会永久卡在招牌上（实测踩过）。
+     */
+    private clearError = (): void => {
+        if (!this.isValid) return;
         const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
         if (marquee && this.marqueeText) marquee.string = this.marqueeText;
-    }
+    };
 
     /** 启动阶段就失败（Bundle 或 config 取不到）：这时还没有任何权威数值可保留。 */
     private onFatal(err: unknown): void {
