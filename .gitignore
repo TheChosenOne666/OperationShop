@@ -18,6 +18,9 @@ NewProject/profiles/
 .workbuddy/
 .workbuddy-ai/
 
+# 仓库根的 agent 规则文件（按本机环境维护，不进版本库）
+/AGENTS.md
+
 # Qoder 技能在本机的报告产物（会话 token / credits 消耗的 Canvas 快照），不入库
 .qoder-credits/
 
