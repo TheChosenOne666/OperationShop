@@ -47,11 +47,23 @@ export interface ShopView {
     slot: number;
     prepared: boolean;
     level: number;
+    /**
+     * 该店**当前**的单客收益档位，已含满铺加成。
+     * ⚠️ 它**不是**「本轮客人按什么价付的」：服务端先结算后应用命令，同一条 Prepare/Upgrade
+     * 响应里这里是加价后的新价，客人却按加价前的旧价入账（口径见 ADR 0001 与
+     * `internal/game/service.go` 的 ShopView 注释）。要显示成交价就读 `Arrival.unitPrice`。
+     */
     unitPrice: number;
+    /** 等级单价那一半。`unitPriceBase + floorBonus === unitPrice`，两半都由服务端给。 */
+    unitPriceBase: number;
+    /** 该店当前**实际生效**的满铺加成，未满铺为 0。客户端不得自己判满铺（GDD §6.2）。 */
+    floorBonus: number;
     visitors: number;
     revenue: number;
     /** null 表示已满级，没有下一级可升。 */
     upgradeCost: number | null;
+    /** 升级一级后的单客收益；已满级时为 null。满铺状态与等级无关，所以加成沿用同一个。 */
+    nextUnitPrice: number | null;
 }
 
 /** GET /api/v1/mall 的响应体，也是 Result.state。 */
@@ -61,6 +73,11 @@ export interface MallView {
     revision: number;
     coins: number;
     spent: number;
+    /**
+     * 当前业务日内的到店进账。跨业务日由服务端归零，解锁与升级的支出**不**从里面扣，
+     * 所以经营页那一格可以原样显示，不必客户端拿金币做差猜。
+     */
+    todayEarned: number;
     businessDay: string;
     capFrozen: boolean;
     /**

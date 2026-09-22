@@ -10,13 +10,17 @@
 //
 // 依据：
 //   ADR 0001 服务端权威 / 客户端零计算 —— 只搬运与比较服务端给的字段，
-//       不出现单价、客流上限、解锁价等任何规则常量（唯一的运算是累计计数做差，见 diffArrivals）。
+//       不出现单价、客流上限、解锁价等任何规则常量。
+//       允许的运算只有两类：① 对服务端累计计数做差（本层的 diffArrivals）；
+//       ② 服务端字段之间**不含规则常量**的加减（M06 的「再攒 N 金币」「解锁后余额」，
+//       发生在界面层不在这里）。②的口径由主理人 2026-09-22 裁定，见 docs/M06-页面与弹窗.md §8。
+//       《系统-经营与成长》§6.1 许可的逐层「已开业数 / 铺位数」纯计数同属此列。
 //   《玩法与技术方案》B3.6 —— 主界面每 5 秒 settle、切后台停轮询、回前台立即取权威状态。
 //   《开发规划文档》§M05 验收第 3 条 —— 界面数值永远以最近一次服务端响应为准，不跳变不回退。
 import type { MallView, Result } from "./ApiTypes";
 
-/** 一次请求的来源，只用于日志与表现分层。 */
-export type StoreOp = "snapshot" | "settle" | "prepare";
+/** 一次请求的来源，只用于日志与表现分层。unlock / upgrade 是 M06 布局页与升级弹窗的入口。 */
+export type StoreOp = "snapshot" | "settle" | "prepare" | "unlock" | "upgrade";
 
 /** 本轮结算里客人的归属：某店来了几位、按什么价入账。由两份快照的 shops[].visitors 相减得出。 */
 export interface Arrival {
@@ -41,11 +45,14 @@ export interface StoreUpdate {
     op: StoreOp;
 }
 
-/** 传输层抽象。真实实现是 ApiClient 的三个函数，探针里换成可控的假实现。 */
+/** 传输层抽象。真实实现是 ApiClient 的五个函数，探针里换成可控的假实现。 */
 export interface StoreTransport {
     fetchMall(): Promise<MallView>;
     settle(): Promise<Result>;
     prepareShop(shopId: string): Promise<Result>;
+    upgradeShop(shopId: string): Promise<Result>;
+    /** 注意用的是**铺位 id**（`f2-s1`），不是店铺 id。 */
+    unlockSlot(slotId: string): Promise<Result>;
 }
 
 /** 界面层回调。错误只给稳定错误码，不给中文提示（与 ApiClient 同口径）。 */
@@ -172,6 +179,31 @@ export class MallStore {
         return this.enqueue("prepare", async () => {
             const result = await this.transport.prepareShop(shopId);
             this.accept(result.state, result, "prepare");
+        });
+    }
+
+    /**
+     * 解锁铺位（M06 布局页的主按钮，游戏里最大额的不可逆支出——所以界面上必须先过
+     * 一道确认弹窗）。花费由服务端扣，本层只负责把它排进同一条串行链。
+     * ⚠️ 参数是**铺位 id**（`f2-s1`）。传成店铺 id 服务端一律 404。
+     */
+    unlock(slotId: string): Promise<void> {
+        console.log(`[m05] 玩家请求解锁铺位：${slotId}`);
+        return this.enqueue("unlock", async () => {
+            const result = await this.transport.unlockSlot(slotId);
+            this.accept(result.state, result, "unlock");
+        });
+    }
+
+    /**
+     * 升级店铺。与开店一样入队而不是被 busy 拦掉：玩家点「确认升级」后看到的数字
+     * 必须来自这一条响应里的新快照，不能等下一轮轮询。
+     */
+    upgrade(shopId: string): Promise<void> {
+        console.log(`[m05] 玩家请求升级店铺：${shopId}`);
+        return this.enqueue("upgrade", async () => {
+            const result = await this.transport.upgradeShop(shopId);
+            this.accept(result.state, result, "upgrade");
         });
     }
 

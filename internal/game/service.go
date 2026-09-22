@@ -26,9 +26,13 @@ var (
 	ErrNumericLimit      = errors.New("safe integer limit reached")
 )
 
-// schemaVersion identifies the v2 save layout (segmented ledger, unlocked slots,
-// per-shop levels and the two-state visitor cap).
-const schemaVersion = 2
+// schemaVersion identifies the save layout. v2 brought the segmented ledger, unlocked
+// slots, per-shop levels and the two-state visitor cap; v3 adds todayEarned.
+// TodayEarned cannot be rebuilt from an older save: segments record no timestamps, so a
+// single business day's slice is unrecoverable (架构现状 §8-9). Defaulting it to zero would
+// let the client show a plausible-but-wrong "today's income", which is worse than the
+// development-period save reset this bump forces.
+const schemaVersion = 3
 
 const maxSafeInteger int64 = 1<<53 - 1
 
@@ -53,12 +57,15 @@ type ShopState struct {
 // State is the versioned save for the single local development account.
 // capFrozen is the only judge of whether dailyVisitorCap is meaningful: an
 // unfrozen day stores the placeholder 0 and every reader ignores it.
+// TodayEarned counts arrival income booked inside the current business day only:
+// spending never reduces it, and it resets when the day rolls over.
 type State struct {
 	SchemaVersion     int         `json:"schemaVersion"`
 	RulesFingerprint  string      `json:"rulesFingerprint"`
 	Revision          int64       `json:"revision"`
 	Coins             int64       `json:"coins"`
 	Spent             int64       `json:"spent"`
+	TodayEarned       int64       `json:"todayEarned"`
 	BusinessDay       string      `json:"businessDay"`
 	CapFrozen         bool        `json:"capFrozen"`
 	DailyVisitorCap   int64       `json:"dailyVisitorCap"`
@@ -71,6 +78,13 @@ type State struct {
 }
 
 // ShopView is the client-facing shop snapshot; unitPrice and upgradeCost are derived.
+//
+// Reading UnitPrice: it is this shop's CURRENT per-visitor tier, NOT the price the
+// visitors of one settlement round actually paid. `mutate` accrues before it applies the
+// command, so a Prepare or Upgrade response can carry a raised UnitPrice while the very
+// same round's visitors were booked at the previous, lower tier. A presentation layer
+// that shows an amount a visitor paid must take the booked price from the previous
+// snapshot (see `Arrival.unitPrice` client-side), not from this field.
 type ShopView struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -82,16 +96,30 @@ type ShopView struct {
 	Visitors    int64  `json:"visitors"`
 	Revenue     int64  `json:"revenue"`
 	UpgradeCost *int64 `json:"upgradeCost"`
+	// UnitPriceBase and FloorBonus split UnitPrice into the configured level price and
+	// the full-floor addition actually applied to this shop, so that
+	// UnitPriceBase+FloorBonus == UnitPrice. The split is published because the design
+	// shows the composition to the player while GDD §6.2 forbids the client from
+	// deciding floor fullness on its own.
+	UnitPriceBase int64 `json:"unitPriceBase"`
+	FloorBonus    int64 `json:"floorBonus"`
+	// NextUnitPrice is the per-visitor price after one upgrade, nil at max level.
+	// Floor fullness depends only on unlocked and prepared slots, never on level,
+	// so the same FloorBonus applies after the upgrade.
+	NextUnitPrice *int64 `json:"nextUnitPrice"`
 }
 
 // MallView is the client-facing snapshot. DailyVisitorCap is nil exactly when the
-// day is not frozen, so the client never sees the placeholder 0.
+// day is not frozen, so the client never sees the placeholder 0. TodayEarned is the
+// arrival income of the current business day, so the client never subtracts a previous
+// day's coins to guess it.
 type MallView struct {
 	SchemaVersion     int        `json:"schemaVersion"`
 	RulesFingerprint  string     `json:"rulesFingerprint"`
 	Revision          int64      `json:"revision"`
 	Coins             int64      `json:"coins"`
 	Spent             int64      `json:"spent"`
+	TodayEarned       int64      `json:"todayEarned"`
 	BusinessDay       string     `json:"businessDay"`
 	CapFrozen         bool       `json:"capFrozen"`
 	DailyVisitorCap   *int64     `json:"dailyVisitorCap"`
@@ -394,13 +422,23 @@ func (s *Service) floorFull(state State, floor int) bool {
 	return true
 }
 
+// levelPrice is the configured per-visitor price of a shop at its current level.
+func (s *Service) levelPrice(state State, shopIndex int) int64 {
+	return s.cfg.Shops[shopIndex].LevelCoinsPerVisitor[state.Shops[shopIndex].Level-1]
+}
+
+// floorBonus is the full-floor addition actually applied to one shop, zero while that
+// floor is not full. It never depends on level, so it survives an upgrade unchanged.
+func (s *Service) floorBonus(state State, shopIndex int) int64 {
+	if s.floorFull(state, s.cfg.Shops[shopIndex].Floor) {
+		return s.cfg.FullFloorBonus
+	}
+	return 0
+}
+
 // unitPrice is the configured level price plus the full-floor bonus of that floor.
 func (s *Service) unitPrice(state State, shopIndex int) int64 {
-	price := s.cfg.Shops[shopIndex].LevelCoinsPerVisitor[state.Shops[shopIndex].Level-1]
-	if s.floorFull(state, s.cfg.Shops[shopIndex].Floor) {
-		price += s.cfg.FullFloorBonus
-	}
-	return price
+	return s.levelPrice(state, shopIndex) + s.floorBonus(state, shopIndex)
 }
 
 // syncFloorSegments appends a segment for every open shop on one floor whose price changed.
@@ -485,6 +523,7 @@ func (s *Service) accrue(state *State, now time.Time, result *Result) error {
 		state.CapFrozen = false
 		state.DailyVisitorCap = 0
 		state.VisitorsRemaining = 0
+		state.TodayEarned = 0
 		// Past business days are not backfilled; no multi-day offline rewards.
 		state.LastAccrualAt = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, s.zone).UTC()
 	}
@@ -527,6 +566,7 @@ func (s *Service) accrue(state *State, now time.Time, result *Result) error {
 			return ErrNumericLimit
 		}
 		state.Coins += amount
+		state.TodayEarned += amount
 		shop.Visitors++
 		shop.Revenue += amount
 		last.Visitors++
@@ -546,6 +586,7 @@ func (s *Service) validateState(state State) error {
 	if state.Revision < 1 || state.Revision > maxSafeInteger ||
 		state.Coins < 0 || state.Coins > maxSafeInteger ||
 		state.Spent < 0 || state.Spent > maxSafeInteger ||
+		state.TodayEarned < 0 || state.TodayEarned > maxSafeInteger ||
 		state.NextShopIndex < 0 || state.NextShopIndex >= len(s.cfg.Shops) ||
 		len(state.Shops) != len(s.cfg.Shops) {
 		return fmt.Errorf("state counters out of range")
@@ -593,6 +634,11 @@ func (s *Service) validateState(state State) error {
 	}
 	if total < state.Spent || state.Coins != total-state.Spent {
 		return fmt.Errorf("coin total does not match revenue and spending")
+	}
+	// TodayEarned is one business day's slice of that lifetime total, so it can never
+	// exceed it. Spending is booked through Spent and never lowers this field.
+	if state.TodayEarned > total {
+		return fmt.Errorf("today income exceeds the lifetime revenue")
 	}
 	return nil
 }
@@ -657,7 +703,8 @@ func (s *Service) validateVisitorCap(state State) error {
 func (s *Service) view(state State) MallView {
 	view := MallView{
 		SchemaVersion: state.SchemaVersion, RulesFingerprint: state.RulesFingerprint, Revision: state.Revision,
-		Coins: state.Coins, Spent: state.Spent, BusinessDay: state.BusinessDay, CapFrozen: state.CapFrozen,
+		Coins: state.Coins, Spent: state.Spent, TodayEarned: state.TodayEarned,
+		BusinessDay: state.BusinessDay, CapFrozen: state.CapFrozen,
 		VisitorsRemaining: state.VisitorsRemaining, LastAccrualAt: state.LastAccrualAt,
 		LastObservedAt: state.LastObservedAt, UnlockedSlots: append([]string(nil), state.UnlockedSlots...),
 	}
@@ -674,10 +721,12 @@ func (s *Service) view(state State) MallView {
 			ID: shop.ID, Name: s.cfg.Shops[i].Name, Floor: s.cfg.Shops[i].Floor, Slot: s.cfg.Shops[i].Slot,
 			Prepared: shop.Prepared, Level: shop.Level, UnitPrice: s.unitPrice(state, i),
 			Visitors: shop.Visitors, Revenue: shop.Revenue,
+			UnitPriceBase: s.levelPrice(state, i), FloorBonus: s.floorBonus(state, i),
 		}
 		if shop.Level < s.maxLevel {
 			cost := s.cfg.UpgradeCosts[shop.Level-1]
-			item.UpgradeCost = &cost
+			next := s.cfg.Shops[i].LevelCoinsPerVisitor[shop.Level] + item.FloorBonus
+			item.UpgradeCost, item.NextUnitPrice = &cost, &next
 		}
 		view.Shops = append(view.Shops, item)
 	}

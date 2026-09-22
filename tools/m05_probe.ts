@@ -59,11 +59,13 @@ function view(
     prices?: Record<string, number>,
 ): MallView {
     return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         rulesFingerprint: "probe",
         revision,
         coins,
         spent: 0,
+        // 形状完整用：当日收益的取值对不对归 Go 测试与浏览器实测，本探针不据它下判。
+        todayEarned: 0,
         businessDay: "2026-09-21",
         capFrozen: served > 0,
         dailyVisitorCap: served > 0 ? 50 : null,
@@ -84,9 +86,14 @@ function view(
                 prepared: prepared ? prepared.includes(id) : true,
                 level: 1,
                 unitPrice: price,
+                // 夹具不设满铺加成，故两半取「base 即全部」；加成对不对由 Go 侧
+                // TestShopViewPriceSplit 与浏览器实测管，这里只保证字段形状不缺。
+                unitPriceBase: price,
+                floorBonus: 0,
                 visitors: visitors[id] ?? 0,
                 revenue: (visitors[id] ?? 0) * price,
                 upgradeCost: 300,
+                nextUnitPrice: price + 1,
             };
         }),
     };
@@ -117,6 +124,8 @@ class FakeTransport implements StoreTransport {
     mallResults: Array<MallView | Error> = [];
     settleResults: Array<Result | Error> = [];
     prepareResults: Array<Result | Error> = [];
+    upgradeResults: Array<Result | Error> = [];
+    unlockResults: Array<Result | Error> = [];
     /** 挂住请求用：非空时每个请求都要先等它，用来制造「在飞」状态。 */
     gate: Promise<void> | null = null;
 
@@ -136,6 +145,18 @@ class FakeTransport implements StoreTransport {
         this.calls.push(`prepare:${shopId}`);
         if (this.gate) await this.gate;
         return take(this.prepareResults);
+    }
+
+    async upgradeShop(shopId: string): Promise<Result> {
+        this.calls.push(`upgrade:${shopId}`);
+        if (this.gate) await this.gate;
+        return take(this.upgradeResults);
+    }
+
+    async unlockSlot(slotId: string): Promise<Result> {
+        this.calls.push(`unlock:${slotId}`);
+        if (this.gate) await this.gate;
+        return take(this.unlockResults);
     }
 }
 
@@ -574,6 +595,91 @@ async function main(): Promise<void> {
         ]);
         assert.strictEqual(store.view?.coins, 1298);
         assert.strictEqual(store.view?.visitorsServed, 3);
+    });
+
+    // ---------- M06：布局页与升级弹窗走的是同一条编排链 ----------
+
+    console.log("[m05-probe] ⑧ M06 写命令（解锁 / 升级）的编排层行为");
+
+    await checkAsync("解锁成功 → 界面收的是响应里的新快照，op 标 unlock", async () => {
+        const transport = new FakeTransport();
+        const recorder = new Recorder();
+        const store = new MallStore(transport, recorder);
+        transport.mallResults.push(view(1, 1280, 0, { coffee: 0 }));
+        await store.load();
+        // 解锁后的快照：金币已扣 600、该铺进入已解锁集、下一档推进到 f2-s2。
+        const after = view(2, 680, 0, { coffee: 0 });
+        after.spent = 600;
+        after.unlockedSlots = ["f1-s1", "f1-s2", "f2-s1"];
+        after.nextSlotId = "f2-s2";
+        after.nextUnlockCost = 800;
+        transport.unlockResults.push(result(after, 0, 0));
+        await store.unlock("f2-s1");
+        await flush();
+        const update = recorder.updates.at(-1);
+        assert.strictEqual(update?.op, "unlock");
+        assert.deepStrictEqual(update?.view.unlockedSlots, ["f1-s1", "f1-s2", "f2-s1"], "布局页要按它决定铺位是 S1 还是 S2");
+        assert.strictEqual(update?.view.coins, 680, "余额取服务端给的，客户端不做 1280−600");
+        assert.strictEqual(update?.view.nextSlotId, "f2-s2");
+        assert.strictEqual(recorder.failures.length, 0);
+    });
+
+    await checkAsync("升级被拒（金币不足）→ 失败带 op=upgrade，基线与渲染都不动", async () => {
+        const transport = new FakeTransport();
+        const recorder = new Recorder();
+        const store = new MallStore(transport, recorder);
+        transport.mallResults.push(view(1, 100, 0, { coffee: 0 }));
+        await store.load();
+        transport.upgradeResults.push(apiError("INSUFFICIENT_COINS"));
+        await store.upgrade("coffee");
+        await flush();
+        assert.deepStrictEqual(recorder.failures, [{ code: "INSUFFICIENT_COINS", op: "upgrade" }]);
+        assert.strictEqual(store.view?.revision, 1, "被拒的升级不得前移基线");
+        assert.strictEqual(recorder.updates.length, 1, "被拒的升级不得触发重渲染");
+    });
+
+    await checkAsync("轮询在飞时点「确认解锁」→ 排队不丢，三个请求严格串行", async () => {
+        const transport = new FakeTransport();
+        const recorder = new Recorder();
+        const store = new MallStore(transport, recorder);
+        transport.mallResults.push(view(1, 1280, 0, { coffee: 0 }));
+        await store.load();
+        const gate = deferred();
+        transport.gate = gate.promise;
+        transport.settleResults.push(result(view(2, 1286, 1, { coffee: 1 }), 1, 6));
+        assert.strictEqual(store.tick(), "queued");
+        await flush();
+        const unlocking = store.unlock("f2-s1");
+        await flush();
+        assert.strictEqual(store.isBusy, true, "两个请求都应还挂在链上");
+        const after = view(3, 686, 1, { coffee: 1 });
+        after.spent = 600;
+        after.unlockedSlots = ["f1-s1", "f1-s2", "f2-s1"];
+        transport.unlockResults.push(result(after, 0, 0));
+        gate.resolve();
+        await unlocking;
+        await flush();
+        assert.deepStrictEqual(transport.calls, ["mall", "settle", "unlock:f2-s1"], "点击不能被 busy 吞掉，也不许并发");
+        assert.strictEqual(recorder.updates.length, 3, "两笔响应各自渲染一次");
+        assert.strictEqual(store.view?.coins, 686);
+    });
+
+    await checkAsync("同一条 upgrade 响应：弹窗读新档位，飘字仍读入账旧价", async () => {
+        // 服务端 mutate 先 accrue 后 apply（SC-M05-QA-002 P1-A 的根）。M06 起这两个数会同时
+        // 出现在屏幕上——详情/升级弹窗读响应里的 unitPrice 与 nextUnitPrice，飘字读 arrival
+        // 带来的上一份快照价。两边各自正确，互不顶替。
+        const transport = new FakeTransport();
+        const recorder = new Recorder();
+        const store = new MallStore(transport, recorder);
+        transport.mallResults.push(view(1, 1280, 3, { coffee: 3 }, ["coffee"], { coffee: 6 }));
+        await store.load();
+        transport.upgradeResults.push(result(view(2, 1286, 4, { coffee: 4 }, ["coffee"], { coffee: 7 }), 1, 6));
+        await store.upgrade("coffee");
+        await flush();
+        const update = recorder.updates.at(-1);
+        assert.strictEqual(update?.view.shops[0].unitPrice, 7, "界面档位用本次响应的新价");
+        assert.strictEqual(update?.view.shops[0].nextUnitPrice, 8, "升级预告的下一级单价同样来自响应");
+        assert.deepStrictEqual(update?.arrivals, [{ shopId: "coffee", visitors: 1, unitPrice: 6 }], "飘字用入账时的旧价");
     });
 
     // ---------- 汇总 ----------

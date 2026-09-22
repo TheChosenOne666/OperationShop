@@ -70,3 +70,20 @@ export const settle = () => request<Result>("POST", "/api/v1/mall/settle");
  */
 export const prepareShop = (shopId: string) =>
     request<Result>("POST", `/api/v1/shops/${encodeURIComponent(shopId)}/prepare`);
+
+/**
+ * 升级店铺（1→5 级）。花 `upgradeCost` 金币，下一级起按新单价记账，历史收益不追溯。
+ * 未开业返回 `SHOP_NOT_OPEN`、满级返回 `MAX_LEVEL`、余额不够返回 `INSUFFICIENT_COINS`，
+ * 三种拒绝都不改变服务端状态。
+ * ⚠️ `shopId` 是店铺 id（`coffee`），不是铺位 id（`f1-s1`）。
+ */
+export const upgradeShop = (shopId: string) =>
+    request<Result>("POST", `/api/v1/shops/${encodeURIComponent(shopId)}/upgrade`);
+
+/**
+ * 解锁铺位（M06 布局页的主操作，游戏里最大额的不可逆支出）。
+ * 跳序返回 `SLOT_ORDER`、已解锁的铺位再解锁返回 `SLOT_LOCKED`、余额不够返回 `INSUFFICIENT_COINS`。
+ * ⚠️ 这里用**铺位 id**（`f2-s1`），不是店铺 id——两套 id 传错一律 404 `SHOP_NOT_FOUND`。
+ */
+export const unlockSlot = (slotId: string) =>
+    request<Result>("POST", `/api/v1/slots/${encodeURIComponent(slotId)}/unlock`);

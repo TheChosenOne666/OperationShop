@@ -756,6 +756,9 @@ func TestServiceShanghaiDayRefresh(t *testing.T) {
 	clock.set(start.Add(5 * time.Second))
 	assertTestResult(t, settleTestService(t, service), testUnitPrice(t, cfg, before, 0), 1, true)
 	served := service.snapshotState()
+	if served.TodayEarned != testUnitPrice(t, cfg, before, 0) {
+		t.Fatalf("当日收益应等于当天到账的那一笔：%+v", served)
+	}
 	// 上海 2026-09-13 00:00:07.5：跨日并首次产生当日客人。
 	midnight := start.Add(10 * time.Second)
 	clock.set(midnight.Add(7500 * time.Millisecond))
@@ -770,6 +773,10 @@ func TestServiceShanghaiDayRefresh(t *testing.T) {
 	assertTestResult(t, result, testUnitPrice(t, cfg, served, 1), 1, true)
 	if state.VisitorsRemaining != state.DailyVisitorCap-1 {
 		t.Fatalf("跨日后剩余客流错误：%+v", state)
+	}
+	// 当日收益是「这一天」的口径：跨日必须归零后只记当天那一笔，不能沿用累计值。
+	if state.TodayEarned != testUnitPrice(t, cfg, served, 1) {
+		t.Fatalf("跨日后当日收益应只剩当天进账：%d vs 累计 %d", state.TodayEarned, state.Shops[1].Revenue)
 	}
 	for i, shop := range state.Shops {
 		if !shop.Prepared || shop.Visitors < served.Shops[i].Visitors {
@@ -789,6 +796,33 @@ func TestServiceShanghaiDayRefresh(t *testing.T) {
 	if store.saveCount() != saves {
 		t.Fatal("同一时刻重复请求不能再次刷新客流")
 	}
+}
+
+// TestTodayEarnedIgnoresSpending 验证「今日收益」只统计到店进账：解锁与升级这两笔支出走
+// Spent，不得把它压低。经营页那一格给玩家看的是纯进账（M06 需求 §3.1），若把支出算进去，
+// 玩家花一次钱"今日收益"就倒退，正好踩中 M05 验收第 3 条的「不出现回退」。
+func TestTodayEarnedIgnoresSpending(t *testing.T) {
+	service, _, clock := newFundedTestService(t)
+	prepareTestShops(t, service, "coffee")
+	clock.set(clock.now().Add(5 * time.Second))
+	earned := settleTestService(t, service)
+	before := service.snapshotState()
+	if earned.EarnedCoins == 0 || before.TodayEarned != earned.EarnedCoins {
+		t.Fatalf("前置不成立：当日收益应按到店进账累计（进账 %d，视图 %+v）", earned.EarnedCoins, before)
+	}
+	upgradeTestShop(t, service, "coffee")
+	unlockShopSlot(t, service, "dessert")
+	after := service.snapshotState()
+	if after.Spent <= before.Spent {
+		t.Fatalf("前置不成立：这条路径必须真的花过钱（%d → %d）", before.Spent, after.Spent)
+	}
+	if after.TodayEarned != before.TodayEarned {
+		t.Fatalf("支出不得压低当日收益：%d → %d", before.TodayEarned, after.TodayEarned)
+	}
+	if view := service.Snapshot(); view.TodayEarned != after.TodayEarned {
+		t.Fatalf("快照的当日收益与存档不符：视图 %d 存档 %d", view.TodayEarned, after.TodayEarned)
+	}
+	assertTestLedger(t, service.Configuration(), after)
 }
 
 // TestServiceOfflineDaysOnlyServeToday 验证离线多天不补算历史客流。
@@ -1114,8 +1148,8 @@ func TestUpgradeMaxLevelAndCoins(t *testing.T) {
 	if store.saveCount() != saves {
 		t.Fatal("满级请求不能写入存档")
 	}
-	if view := service.Snapshot(); view.Shops[0].UpgradeCost != nil {
-		t.Fatalf("满级店铺的升级成本必须为 null：%+v", view.Shops[0])
+	if view := service.Snapshot(); view.Shops[0].UpgradeCost != nil || view.Shops[0].NextUnitPrice != nil {
+		t.Fatalf("满级店铺的升级成本与升级后单价都必须为 null：%+v", view.Shops[0])
 	}
 	// 金币不足：一层铺位开局已解锁，但余额为零。
 	poorConfig := testConfig(t)
@@ -1132,6 +1166,56 @@ func TestUpgradeMaxLevelAndCoins(t *testing.T) {
 	assertTestState(t, poor.snapshotState(), before)
 	if poorStore.saveCount() != saves {
 		t.Fatal("失败的升级不能写入存档")
+	}
+}
+
+// TestShopViewPriceSplit 验证快照把单客收益拆成「等级单价 + 满铺加成」两半，且升级后的
+// 单价沿用同一笔加成。界面上「基础 7 + 满铺 1」那一行只能读这三个字段：客户端自己判满铺
+// 是 GDD §6.2 的红线，而「升级后单价」是 §6.1 早就要求、M02 却没落的那一项（M06 需求 §4 D-1/D-3）。
+func TestShopViewPriceSplit(t *testing.T) {
+	service, _, _ := newFundedTestService(t)
+	cfg := service.Configuration()
+	coffee := testShopIndex(t, cfg, "coffee")
+	flowers := testShopIndex(t, cfg, "flowers")
+
+	// 一层只开了咖啡 ⇒ 未满铺，加成为 0，单价即等级单价。
+	prepareTestShops(t, service, "coffee")
+	cold := service.Snapshot().Shops[coffee]
+	if cold.UnitPriceBase != cfg.Shops[coffee].LevelCoinsPerVisitor[0] || cold.FloorBonus != 0 ||
+		cold.UnitPrice != cold.UnitPriceBase {
+		t.Fatalf("未满铺时加成必须为 0 且两半相加等于单价：%+v", cold)
+	}
+	if cold.NextUnitPrice == nil || *cold.NextUnitPrice != cfg.Shops[coffee].LevelCoinsPerVisitor[1] {
+		t.Fatalf("未满铺时的升级后单价应等于下一级等级单价：%+v", cold.NextUnitPrice)
+	}
+
+	// 花束开业凑满一层 ⇒ 加成同时生效，且谓词确实用独立重算核对过。
+	prepareTestShops(t, service, "flowers")
+	state := service.snapshotState()
+	if !testFloorFull(cfg, state, cfg.Shops[coffee].Floor) {
+		t.Fatal("前置不成立：一层应已满铺")
+	}
+	hot := service.Snapshot().Shops[coffee]
+	if hot.FloorBonus != cfg.FullFloorBonus || hot.UnitPriceBase != cold.UnitPriceBase ||
+		hot.UnitPrice != hot.UnitPriceBase+hot.FloorBonus {
+		t.Fatalf("满铺后必须单列出加成：%+v", hot)
+	}
+
+	// 升级只动等级单价那一半。
+	upgradeTestShop(t, service, "coffee")
+	up := service.Snapshot().Shops[coffee]
+	if up.Level != 2 || up.UnitPriceBase != cfg.Shops[coffee].LevelCoinsPerVisitor[1] ||
+		up.UnitPriceBase == hot.UnitPriceBase || up.FloorBonus != cfg.FullFloorBonus ||
+		up.UnitPrice != up.UnitPriceBase+up.FloorBonus {
+		t.Fatalf("升级后两半都该可核对：%+v", up)
+	}
+	if up.NextUnitPrice == nil || *up.NextUnitPrice != cfg.Shops[coffee].LevelCoinsPerVisitor[2]+up.FloorBonus {
+		t.Fatalf("下一级单价必须沿用同一笔满铺加成：%+v", up.NextUnitPrice)
+	}
+	// 邻居升级不该改花束的分文。
+	if peer := service.Snapshot().Shops[flowers]; peer.UnitPriceBase != cfg.Shops[flowers].LevelCoinsPerVisitor[0] ||
+		peer.FloorBonus != cfg.FullFloorBonus {
+		t.Fatalf("花束的两半被邻居改动：%+v", peer)
 	}
 }
 
@@ -1888,6 +1972,9 @@ func TestNewServiceRejectsInvalidSaves(t *testing.T) {
 		{"金币超安全整数", func(s *State) { s.Coins = maxSafeInteger + 1 }},
 		{"负支出", func(s *State) { s.Spent = -1 }},
 		{"支出超安全整数", func(s *State) { s.Spent = maxSafeInteger + 1 }},
+		{"负当日收益", func(s *State) { s.TodayEarned = -1 }},
+		{"当日收益超安全整数", func(s *State) { s.TodayEarned = maxSafeInteger + 1 }},
+		{"当日收益盖过累计收益", func(s *State) { s.TodayEarned = maxSafeInteger }},
 		{"负轮询游标", func(s *State) { s.NextShopIndex = -1 }},
 		{"轮询游标越界", func(s *State) { s.NextShopIndex = len(cfg.Shops) }},
 		{"缺少店铺", func(s *State) { s.Shops = s.Shops[:4] }},
