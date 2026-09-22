@@ -144,34 +144,53 @@ func readEmptyCommand(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// respondOperation publishes one write command's outcome. B5.6 requires 结算 / 解锁 / 升级
+// to be traceable by result code, and the generic access log only carries method, path and
+// duration — so every outcome, including the accepted no-op, logs one stable code line.
 func respondOperation(w http.ResponseWriter, r *http.Request, logger *slog.Logger, result game.Result, err error) {
+	// Only path and the stable code are logged: never the payload, the token or an error
+	// detail that would reach the log through a client-controlled value.
+	logged := func(code string) {
+		logger.Info("local write command", "path", r.URL.Path, "code", code)
+	}
 	if err == nil {
 		writeJSON(w, http.StatusOK, result)
+		logged("OK")
 		return
 	}
 	switch {
 	case errors.Is(err, game.ErrUnknownShop):
+		logged("SHOP_NOT_FOUND")
 		writeError(w, http.StatusNotFound, "SHOP_NOT_FOUND", "店铺不存在")
 	case errors.Is(err, game.ErrUnknownSlot):
 		// An unknown slot id reuses the stable "target does not exist" code so the
 		// client handles both id systems the same way.
+		logged("SHOP_NOT_FOUND")
 		writeError(w, http.StatusNotFound, "SHOP_NOT_FOUND", "铺位不存在")
 	case errors.Is(err, game.ErrSlotLocked):
+		logged("SLOT_LOCKED")
 		writeError(w, http.StatusConflict, "SLOT_LOCKED", "该铺位尚未解锁")
 	case errors.Is(err, game.ErrSlotOrder):
+		logged("SLOT_ORDER")
 		writeError(w, http.StatusConflict, "SLOT_ORDER", "必须按顺序解锁铺位")
 	case errors.Is(err, game.ErrShopNotOpen):
+		logged("SHOP_NOT_OPEN")
 		writeError(w, http.StatusConflict, "SHOP_NOT_OPEN", "店铺尚未开业，不能升级")
 	case errors.Is(err, game.ErrMaxLevel):
+		logged("MAX_LEVEL")
 		writeError(w, http.StatusConflict, "MAX_LEVEL", "店铺已满级")
 	case errors.Is(err, game.ErrInsufficientCoins):
+		logged("INSUFFICIENT_COINS")
 		writeError(w, http.StatusConflict, "INSUFFICIENT_COINS", "金币不足")
 	case errors.Is(err, game.ErrClockBackwards):
+		logged("CLOCK_BACKWARDS")
 		writeError(w, http.StatusConflict, "CLOCK_BACKWARDS", "服务端时间回退，暂不结算")
 	case errors.Is(err, game.ErrNumericLimit):
+		logged("NUMERIC_LIMIT")
 		writeError(w, http.StatusConflict, "NUMERIC_LIMIT", "存档已达到安全数值上限")
 	default:
 		logger.Error("operation failed", "path", r.URL.Path, "error", err)
+		logged("SAVE_FAILED")
 		writeError(w, http.StatusInternalServerError, "SAVE_FAILED", "存档失败，本次操作未生效")
 	}
 }

@@ -815,6 +815,42 @@ func TestRequestLogDoesNotLeakSecrets(t *testing.T) {
 	}
 }
 
+// TestWriteCommandLogsCarryResultCode 验证 B5.6 要求的三类写命令可按结果码追踪。
+// 通用访问日志只有 method/path/duration，看不出这次命令到底成没成；M06 让解锁与升级第一次
+// 变成玩家可点的按钮，排查「点了没反应」必须有码可查。
+func TestWriteCommandLogsCarryResultCode(t *testing.T) {
+	a := newTestAPI(t)
+	assertStatus(t, a.call(http.MethodPost, "/api/v1/slots/f2-s1/unlock", "{}"), http.StatusOK)
+	assertErrorCode(t, a.call(http.MethodPost, "/api/v1/shops/coffee/upgrade", "{}"), http.StatusConflict, "SHOP_NOT_OPEN")
+	logs := a.logs.String()
+	for _, want := range []string{
+		`"msg":"local write command"`,
+		`"path":"/api/v1/slots/f2-s1/unlock"`,
+		`"code":"OK"`,
+		`"code":"SHOP_NOT_OPEN"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("写命令日志缺少 %s：%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, a.token) {
+		t.Fatal("写命令日志不得带出令牌")
+	}
+}
+
+// TestSnapshotPublishesDisplayFields 守的是**字段名**：M06 界面按这四个字段渲染「基础 + 满铺」
+// 「今日收益」「升级后单价」，客户端镜像 ApiTypes.ts 与探针夹具都照这里的名字写。
+// game 包测取值对不对，这一条只保证序列化出去的名字不漂。
+func TestSnapshotPublishesDisplayFields(t *testing.T) {
+	a := newTestAPI(t)
+	body := a.call(http.MethodGet, "/api/v1/mall", "").Body.String()
+	for _, key := range []string{`"todayEarned"`, `"unitPriceBase"`, `"floorBonus"`, `"nextUnitPrice"`} {
+		if !strings.Contains(body, key) {
+			t.Fatalf("快照响应缺少 %s：%s", key, body)
+		}
+	}
+}
+
 // TestConcurrentPrepareThroughHandler 验证并发命令经由处理器仍只提交一次。
 func TestConcurrentPrepareThroughHandler(t *testing.T) {
 	a := newTestAPI(t)
