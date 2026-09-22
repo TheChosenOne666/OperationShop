@@ -72,6 +72,83 @@ const HUD_READ = `(() => {
     };
     const layer = canvas.getChildByName('GuestLayer');
     const kids = layer ? layer.children : [];
+
+    // ---------- M06 页面层读数 ----------
+    // 只在页面可见时读：隐藏节点上的字符串是上一轮的残值，当成"显示值"会读出假证据。
+    const pageOf = (name) => {
+        const node = canvas.getChildByName(name);
+        return node && node.active ? node : null;
+    };
+    const inPage = (root) => (path) => {
+        if (!root) return null;
+        const node = root.getChildByPath(path);
+        const label = node && node.getComponent(C.Label);
+        return label ? label.string : null;
+    };
+    const activeOf = (root, path) => Boolean(root && root.getChildByPath(path) && root.getChildByPath(path).active);
+    const manage = pageOf('PageManage');
+    const layout = pageOf('PageLayout');
+    const readManage = () => {
+        const at = inPage(manage);
+        const rows = manage ? manage.getChildByName('List').children.map((row, index) => ({
+            i: index,
+            // 行在 List 容器下，路径要带上 List/ 前缀（早先漏了这层，整列读成 null）
+            name: at(\`List/\${row.name}/Name\`),
+            main: at(\`List/\${row.name}/Main\`),
+            sub: at(\`List/\${row.name}/Sub\`),
+            state: ['Opened', 'OpenButton', 'Locked'].filter((k) => activeOf(manage, \`List/\${row.name}/\${k}\`))[0] || 'none',
+            level: at(\`List/\${row.name}/LevelBadge/Level\`),
+            badgeOn: activeOf(manage, \`List/\${row.name}/LevelBadge\`),
+        })) : null;
+        return manage ? {
+            visitors: at('Today/Visitors'),
+            earned: at('Today/Earned'),
+            bonus: at('Today/Bonus'),
+            notice: activeOf(manage, 'Notice') ? text('PageManage/Notice') : '',
+            rows,
+        } : null;
+    };
+    const readLayout = () => {
+        if (!layout) return null;
+        const at = inPage(layout);
+        return {
+            head2: at('Head2/Count'),
+            head1: at('Head1/Count'),
+            boost: layout.getChildByName('Boost').children.filter((n) => n.name.startsWith('Line')).map((n) => n.getComponent(C.Label).string),
+            action: at('Action/Text'),
+            actionCost: at('Action/Cost'),
+            actionDim: (() => {
+                const a = layout.getChildByName('Action');
+                const o = a && a.getComponent(C.UIOpacity);
+                return o ? o.opacity : 255;
+            })(),
+            notice: activeOf(layout, 'Notice') ? text('PageLayout/Notice') : '',
+            // 铺位卡挂在各楼层的 Slots<层> 容器下，卡名是 Card-<铺位id>
+            cardText: layout.children
+                .filter((n) => n.name.startsWith('Slots'))
+                .flatMap((row) => row.children.map((card) => ({
+                    id: card.name.replace('Card-', ''),
+                    name: card.getChildByName('Name').getComponent(C.Label).string,
+                    status: card.getChildByName('Status').getComponent(C.Label).string,
+                }))),
+        };
+    };
+
+    // 可点节点在 Canvas 中心系下的坐标：click 步骤要的就是这个坐标系，
+    // 从运行时量出来比我按稿面推算一遍可靠（节点位置由场景/代码设定，可能与我读稿的理解不符）。
+    const center = canvas.getWorldPosition();
+    const anchor = (path) => {
+        const node = canvas.getChildByPath(path);
+        if (!node) return null;
+        const p = node.getWorldPosition();
+        return [Math.round(p.x - center.x), Math.round(p.y - center.y)];
+    };
+    const clickable = {};
+    for (const path of ['Hud/NavManage', 'Hud/NavLayout', 'Hud/NavFriend']) clickable[path] = anchor(path);
+    for (const [page, rows] of [['PageManage', 5], ['PageLayout', 0]]) {
+        for (let i = 0; i < rows; i += 1) clickable[\`\${page}/List/Row\${i}/OpenButton\`] = anchor(\`\${page}/List/Row\${i}/OpenButton\`);
+        if (page === 'PageLayout') clickable['PageLayout/Action'] = anchor('PageLayout/Action');
+    }
     return JSON.stringify({
         coin: text('Hud/CoinLabel'),
         visitor: text('Hud/VisitorLabel'),
@@ -79,6 +156,10 @@ const HUD_READ = `(() => {
         guests: kids.filter((c) => c.name === 'Guest').length,
         floats: kids.filter((c) => c.name === 'CoinFloat')
             .map((c) => { const t = c.getChildByName('Text'); return t && t.getComponent(C.Label) ? t.getComponent(C.Label).string : '?'; }),
+        page: manage ? 'manage' : layout ? 'layout' : 'home',
+        manage: readManage(),
+        layout: readLayout(),
+        clickable,
     });
 })()`;
 
@@ -174,6 +255,10 @@ async function main() {
         await cdp.send("Log.enable");
         await cdp.send("Page.enable");
         await cdp.send("Network.enable");
+        // 每次取证都关缓存：产物是本地反复重建的，Chrome 复用磁盘缓存会让我们读到**上一版**
+        // 引擎或脚本，表现成"改了没生效"的假阴性（2026-09-22 实测踩过：开了 graphics 裁剪后
+        // 首跑仍报旧错，字节偏移一模一样，就是缓存里的旧 cc.js）。
+        await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
         // 视口见 VIEWPORT 的注释：保 1:1 不缩，否则触点会被视口裁掉
         await cdp.send("Emulation.setDeviceMetricsOverride", {
             width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: 2, mobile: true,
@@ -236,7 +321,7 @@ async function main() {
             const deadline = Date.now() + timeoutMs;
             while (Date.now() < deadline) {
                 for (let i = mark; i < consoleLines.length; i += 1) {
-                    if (/\[m05\] (铺位|玩家请求开店)/.test(consoleLines[i])) return true;
+                    if (/\[m0[56]\] (铺位|玩家请求|切页|主按钮|当前页|点了)/.test(consoleLines[i])) return true;
                 }
                 await sleep(100);
             }
@@ -340,13 +425,29 @@ async function main() {
             } else if (kind === "hud") {
                 const raw = await evaluate(HUD_READ);
                 if (!raw) {
-                    // 读不到引擎全局就没法归因，这条读数不能当证据——直接非零退出，别静默过去
-                    console.log("  📊 HUD 读数：页面里没有 window.cc，产物可能不是 web-desktop");
-                    process.exitCode = 1;
+                    // 产物里没有 window.cc（2026-09-22 实测：web-desktop 全量 grep 零命中，
+                    // 而 debug=true 会让编辑器去重编引擎并被 SIGTERM 杀掉）。
+                    // 改从界面自己打的渲染摘要取证——日志里那行就是各 Label 当时的字符串，
+                    // 归因强度不低于从外部读引擎全局，且不需要给产物开调试口子。
+                    const applied = consoleLines.filter((l) => l.includes("[m05] 应用")).pop();
+                    const render = consoleLines.filter((l) => l.includes("[m06] 渲染")).pop();
+                    if (!applied && !render) {
+                        // 两条都没有就是真读不到，不能当证据——非零退出，别静默过去
+                        console.log("  📊 HUD 读数：既无 window.cc，控制台里也没有 [m05] 应用 / [m06] 渲染 行");
+                        process.exitCode = 1;
+                    } else {
+                        const strip = (line) => (line ? line.replace(/^.*?: /, "") : "无");
+                        hudReads.push({ from: "console", server: strip(applied), ui: strip(render) });
+                        console.log(`  📊 服务端侧：${strip(applied)}`);
+                        console.log(`  📊 界面侧：${strip(render)}`);
+                    }
                 } else {
                     const h = JSON.parse(raw);
                     hudReads.push(h);
                     console.log(`  📊 金币=${h.coin} 客流=${h.visitor} 招牌=${h.marquee} 在场=${h.guests} 人 飘字=${JSON.stringify(h.floats)}`);
+                    if (h.manage) console.log(`  📊 经营页=${JSON.stringify(h.manage)}`);
+                    if (h.layout) console.log(`  📊 布局页=${JSON.stringify(h.layout)}`);
+                    if (h.clickable) console.log(`  📊 可点坐标=${JSON.stringify(h.clickable)}`);
                 }
             } else if (kind === "wait") {
                 const secs = Number(rest.join(":"));
