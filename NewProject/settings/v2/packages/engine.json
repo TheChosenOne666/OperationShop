@@ -42,7 +42,7 @@
             "_value": true
           },
           "graphics": {
-            "_value": false
+            "_value": true
           },
           "ui-skew": {
             "_value": false
@@ -199,6 +199,7 @@
           "custom-pipeline",
           "gfx-webgl",
           "gfx-webgl2",
+          "graphics",
           "mask",
           "tween",
           "ui"

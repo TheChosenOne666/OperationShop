@@ -12,13 +12,15 @@
 //
 // ⚠️ 渲染必须是**同步且幂等**的：本场景每 5 秒重渲染一次，若渲染里还夹着异步取图，
 //    回调会在多轮之间堆积、顺序不可控。所以启动时一次性预加载全部帧，之后渲染只读缓存。
-import { _decorator, assetManager, Bundle, Component, EffectAsset, game, Game, Label, Material, Node, Sprite, SpriteFrame } from "cc";
-import { ApiError, fetchConfig, fetchMall, prepareShop, settle } from "./ApiClient";
+import { _decorator, assetManager, Bundle, Component, EffectAsset, game, Game, Label, Material, Node, Sprite, SpriteFrame, UIOpacity } from "cc";
+import { ApiError, fetchConfig, fetchMall, prepareShop, settle, unlockSlot, upgradeShop } from "./ApiClient";
 import type { Config, MallView, SlotConfig, ShopView } from "./ApiTypes";
 import { MallStore } from "./MallStore";
 import type { StoreOp, StoreUpdate } from "./MallStore";
 import { GuestStage } from "./GuestStage";
 import type { GuestArt } from "./GuestStage";
+import { MallPages } from "./MallPages";
+import type { PageName } from "./MallPages";
 import { rollNumber, stopRoll } from "./NumberRoll";
 
 const { ccclass } = _decorator;
@@ -83,6 +85,12 @@ export class MallScene extends Component {
     private effect: EffectAsset | null = null;
     private store: MallStore | null = null;
     private guests: GuestStage | null = null;
+    /** M06 页面层（经营页 / 布局页）。节点由它自己建，场景只喂快照与意图。 */
+    private pages: MallPages | null = null;
+    /** 三个导航钮的基线 y，绑定时记一次，供按下态来回挪。 */
+    private readonly navBaseline = new Map<string, number>();
+    /** M06 页面层（经营页 / 布局页）。节点由它自己建，场景只负责喂快照与接意图。 */
+    private pages: MallPages | null = null;
     /** 招牌原文。错误横幅要占这块地方，成功后得还原回去。 */
     private marqueeText = "";
 
@@ -102,9 +110,10 @@ export class MallScene extends Component {
             this.applyStaticArt();
             this.bindSlotInput(cfg);
             this.buildGuestStage(cfg);
+            this.buildPages(cfg);
 
-            // 传输层直接复用 ApiClient 的三个函数；界面层就是本组件。
-            this.store = new MallStore({ fetchMall, settle, prepareShop }, {
+            // 传输层直接复用 ApiClient 的五个函数；界面层就是本组件 + 页面层。
+            this.store = new MallStore({ fetchMall, settle, prepareShop, upgradeShop, unlockSlot }, {
                 onStoreUpdate: (update) => this.onStoreUpdate(update),
                 onStoreError: (code, op) => this.onStoreError(code, op),
             });
@@ -127,6 +136,7 @@ export class MallScene extends Component {
         game.off(Game.EVENT_HIDE, this.onGameHide, this);
         game.off(Game.EVENT_SHOW, this.onGameShow, this);
         this.guests?.dispose();
+        this.pages?.dispose();
         for (const path of ["Hud/CoinLabel", "Hud/VisitorLabel"]) {
             const label = this.node.getChildByPath(path)?.getComponent(Label);
             if (label) stopRoll(label);
@@ -155,14 +165,16 @@ export class MallScene extends Component {
     private onStoreError(code: string, op: StoreOp): void {
         if (!this.isValid) return;
         const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
-        if (!marquee) return;
         // 只按稳定错误码分支，不匹配服务端的中文提示（ADR 0001 同口径）。
         const transport = code === "NETWORK" || code === "TIMEOUT" || code.indexOf("HTTP_") === 0;
-        marquee.string = `${transport ? "连接中断" : "操作失败"} ${code}`;
+        const text = `${transport ? "连接中断" : "操作失败"} ${code}`;
+        if (marquee) marquee.string = text;
+        // 页面盖在招牌之上，同一条信息要落到页内提示位，否则在经营页/布局上看不到失败（验收第 8 条）
+        this.pages?.notify(text);
         // 定时自清，不能只等"下一次成功"来清：见 clearError 的注释
         this.unschedule(this.clearError);
         this.scheduleOnce(this.clearError, ERROR_BANNER_SECONDS);
-        console.error(`[m05] ${op} 失败（${code}），横幅挂 ${ERROR_BANNER_SECONDS} 秒，数值保留最后一次成功值`);
+        console.error(`[m05] ${op} 失败（${code}），提示挂 ${ERROR_BANNER_SECONDS} 秒，数值保留最后一次成功值`);
     }
 
     /**
@@ -174,6 +186,7 @@ export class MallScene extends Component {
         if (!this.isValid) return;
         const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
         if (marquee && this.marqueeText) marquee.string = this.marqueeText;
+        this.pages?.notify(null);
     };
 
     /** 启动阶段就失败（Bundle 或 config 取不到）：这时还没有任何权威数值可保留。 */
@@ -220,9 +233,10 @@ export class MallScene extends Component {
     // ---------- 开店交互 ----------
 
     /**
-     * M05 的最小开店入口：点「待开业」铺位直接开店。
-     * 依据《系统-经营与成长》§2.4——开店不花金币、幂等，没有需要玩家确认的代价，
-     * 所以不做确认弹窗。设计稿里的正式入口（经营页金色「开业」按钮）属 M06。
+     * M05 的最小开店入口：点「待开业」铺位直接开店，M06 保留它作为主界面的快捷入口
+     * （正式入口是经营页的金色「开业」按钮，两者都是同一条 prepare 命令、幂等）。
+     * 另外两态在 M06 有了去处：S1 引到布局页，S3 开店铺详情。
+     * 依据《系统-经营与成长》§2.4——开店不花金币、幂等，没有需要玩家确认的代价。
      */
     private bindSlotInput(cfg: Config): void {
         for (const slot of cfg.slots) {
@@ -242,9 +256,14 @@ export class MallScene extends Component {
             return;
         }
         const state = this.slotStateOf(slot, view);
-        if (state !== "S2") {
-            // S1 的解锁入口属 M06 布局页，S3 的店铺详情属 M06；M05 不做提示 UI，只留痕。
-            console.log(`[m05] 铺位 ${slot.id} 当前是 ${state}，M05 只在「待开业」上响应开店`);
+        if (state === "S1") {
+            // 稿 02 的未开放行文案就写着「需先在布局页解锁铺位」，主界面同样引过去
+            console.log(`[m06] 铺位 ${slot.id} 未开放，引到布局页`);
+            this.showPage("layout");
+            return;
+        }
+        if (state === "S3") {
+            this.askDetail(slot.shopId);
             return;
         }
         void this.store?.prepare(slot.shopId);
@@ -285,6 +304,84 @@ export class MallScene extends Component {
         }
         this.guests = new GuestStage(layer, picked as GuestArt, slots);
         console.log(`[m05] 表演层就绪，客人可映射到 ${slots.size} 家店铺`);
+    }
+
+    // ---------- M06 页面层 ----------
+
+    /**
+     * 建页面层并绑三个导航钮。
+     * ⚠️ 这里的 handler 全部只**上报意图**，数值一律等 MallStore 拿响应回来再渲染
+     *（ADR 0001）。`this.store` 在本函数之后才创建，所以回调里都是取用时再判空。
+     */
+    private buildPages(cfg: Config): void {
+        this.pages = new MallPages({
+            root: this.node,
+            config: cfg,
+            frame: (bundleName, framePath) => this.frames.get(frameKey(bundleName, framePath)) ?? null,
+            handlers: {
+                onPrepare: (shopId) => void this.store?.prepare(shopId),
+                onAskDetail: (shopId) => this.askDetail(shopId),
+                onAskUnlock: (slotId) => this.askUnlock(slotId),
+                onGotoLayout: () => this.showPage("layout"),
+                onHome: () => this.showPage("home"),
+            },
+        });
+        this.bindNav(cfg);
+    }
+
+    /**
+     * 三个导航钮：经营与布局切页，好友属 M08——按稿只留入口，不做假榜单。
+     * 稿 §6.2 的按下态是「下沉 2px + 亮度 −12%」，这里用 UIOpacity 表达亮度，
+     * 基线位置在绑定时记一次，避免每轮切页把节点越挪越远。
+     */
+    private bindNav(cfg: Config): void {
+        void cfg;
+        const targets: Array<[string, PageName]> = [
+            ["Hud/NavManage", "manage"],
+            ["Hud/NavLayout", "layout"],
+            ["Hud/NavFriend", "home"],
+        ];
+        for (const [path, page] of targets) {
+            const node = this.node.getChildByPath(path);
+            if (!node) {
+                console.error(`[m06] 场景里找不到导航节点 ${path}`);
+                continue;
+            }
+            if (!this.navBaseline.has(path)) this.navBaseline.set(path, node.position.y);
+            node.on(Node.EventType.TOUCH_END, () => {
+                if (page === "home") {
+                    console.log("[m06] 好友页属 M08，本模块只留入口");
+                    return;
+                }
+                this.showPage(this.pages?.page === page ? "home" : page);
+            }, node);
+        }
+    }
+
+    /** 切页 + 导航按下态。同页重复调用由页面层自己吞掉，这里的高亮则是幂等的。 */
+    private showPage(page: PageName): void {
+        this.pages?.show(page);
+        const activePath = page === "manage" ? "Hud/NavManage" : page === "layout" ? "Hud/NavLayout" : "";
+        for (const [path, base] of this.navBaseline) {
+            const node = this.node.getChildByPath(path);
+            if (!node) continue;
+            const active = path === activePath;
+            node.setPosition(node.position.x, active ? base - 2 : base, 0);
+            const opacity = node.getComponent(UIOpacity) ?? node.addComponent(UIOpacity);
+            // 亮度 −12%（§6.2 按下态）。色相不动，红线是不靠颜色表达状态。
+            opacity.opacity = active ? 224 : 255;
+        }
+        console.log(`[m06] 当前页=${page}`);
+    }
+
+    /** 店铺详情弹窗（M06 任务 6）。现在只出声，接线时改这一处即可。 */
+    private askDetail(shopId: string): void {
+        console.log(`[m06] 请求打开店铺详情：${shopId}（弹窗属任务 6，尚未接上）`);
+    }
+
+    /** 解锁确认弹窗（M06 任务 6）。按钮的禁用态已在页面层拦掉，这里收到的一定是买得起的。 */
+    private askUnlock(slotId: string): void {
+        console.log(`[m06] 请求解锁铺位：${slotId}（确认弹窗属任务 6，尚未接上）`);
     }
 
     // ---------- 资源 ----------
@@ -382,6 +479,8 @@ export class MallScene extends Component {
     private render(view: MallView): void {
         this.renderSlots(view);
         this.renderHud(view);
+        // 页面层自己判可见性：停在主界面时它不动画任何节点
+        this.pages?.render(view);
     }
 
     private renderSlots(view: MallView): void {
