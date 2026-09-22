@@ -5,17 +5,21 @@
 //     node --experimental-strip-types tools/m05_probe.ts
 //
 // 覆盖七类判据（对应 docs/M05-经营闭环.md §8 第 2 项）：
-//   ① 逐店 diff 正确（含无基线、含 0 到店、含累计倒退告警）
+//   ① 逐店 diff 正确（含无基线、含 0 到店、含累计倒退告警、含**单价取上一份快照**）
 //   ② revision 守卫：相等（空转）丢弃；变小判为服务端重建档 → 清基线重新应用
 //   ③ 请求串行不并发；界面回调抛异常既不投毒链、也不提交基线
 //   ④ 暂停期间不发请求，恢复时立即取权威状态
-//   ⑤ 逐店合计与服务端 visitorsUsed 不一致时出声但仍应用
-//   ⑥ 单个请求失败不断链，错误码上抛给界面层
-//   ⑦ 开店与首笔收益、以及「只给 visitors 有增量的店画客人」的数值形状
+//   ⑤ 逐店合计与服务端 visitorsUsed 不一致时出声但仍应用；单个请求失败不断链、错误码上抛
+//   ⑥ 开店 → 首笔收益这一串在编排层交出的数值形状
+//   ⑦ diff 只收累计值有增量的店
+// ⚠️ ⑥⑦ 的组名刻意带上「不证验收 N」：它们跑的是假 transport，不是《开发规划文档》§三
+//    那四条验收标准的证据（独立复核 SC-M05-QA-002 P2-B）。
 // ⚠️ 边界要说清：本探针证的是**编排层**。S2→S3 换图、客人真走到门口、
 //    以及「未开业不产收益」这条服务端不变量，分别归实机截图与 internal/game 的 Go 测试。
 //    （独立复核 SC-M05-QA-001 P2 指出：夹具原先把 prepared 一律写死为 true，
-//     使"开店""未开业不出客人"两条变成断言自己造的假数据——已改为显式声明。）
+//     使"开店""未开业不出客人"两条变成断言自己造的假数据——已改为显式声明；
+//     SC-M05-QA-002 §3a 进一步指出 prepared 对本层的 diff 根本不可读，
+//     故 ⑦ 改用「未开业店累计值取非零常量」让那条断言真的可能失败。）
 import assert from "node:assert";
 import { diffArrivals, MallStore } from "../NewProject/assets/scripts/MallStore.ts";
 import type { Arrival, StoreOp, StoreObserver, StoreTransport, StoreUpdate } from "../NewProject/assets/scripts/MallStore.ts";
@@ -44,6 +48,7 @@ console.error = (...args: unknown[]) => {
  * `prepared` 显式给出**已开业**的店铺集合；省略时视为全部已开业。
  * ⚠️ 不能一律写死 `prepared: true`——那会让"开店"与"未开业不出客人"两类用例变成
  *    断言自己造的假数据（独立复核 SC-M05-QA-001 P2 抓到的正是这条）。
+ * `prices` 覆盖各店单价（省略即 6）；SC-M05-QA-002 P1-A 的那条用例要用到"同一轮里价变了"。
  */
 function view(
     revision: number,
@@ -51,6 +56,7 @@ function view(
     served: number,
     visitors: Record<string, number>,
     prepared?: string[],
+    prices?: Record<string, number>,
 ): MallView {
     return {
         schemaVersion: 2,
@@ -68,18 +74,21 @@ function view(
         unlockedSlots: ["f1-s1", "f1-s2"],
         nextSlotId: "f2-s1",
         nextUnlockCost: 600,
-        shops: Object.keys(visitors).map((id) => ({
-            id,
-            name: id,
-            floor: 1,
-            slot: 1,
-            prepared: prepared ? prepared.includes(id) : true,
-            level: 1,
-            unitPrice: 6,
-            visitors: visitors[id] ?? 0,
-            revenue: (visitors[id] ?? 0) * 6,
-            upgradeCost: 300,
-        })),
+        shops: Object.keys(visitors).map((id) => {
+            const price = prices?.[id] ?? 6;
+            return {
+                id,
+                name: id,
+                floor: 1,
+                slot: 1,
+                prepared: prepared ? prepared.includes(id) : true,
+                level: 1,
+                unitPrice: price,
+                visitors: visitors[id] ?? 0,
+                revenue: (visitors[id] ?? 0) * price,
+                upgradeCost: 300,
+            };
+        }),
     };
 }
 
@@ -213,16 +222,26 @@ async function main(): Promise<void> {
     check("单店 +1 → 一位客人归属该店", () => {
         const prev = view(1, 1280, 3, { coffee: 3, flowers: 0 });
         const next = view(2, 1286, 4, { coffee: 4, flowers: 0 });
-        assert.deepStrictEqual(diffArrivals(prev, next), [{ shopId: "coffee", visitors: 1 }]);
+        assert.deepStrictEqual(diffArrivals(prev, next), [{ shopId: "coffee", visitors: 1, unitPrice: 6 }]);
     });
 
     check("多店同时到店（回前台补算的形状）→ 逐店分别计数", () => {
         const prev = view(1, 1280, 10, { coffee: 5, flowers: 5 });
         const next = view(2, 1400, 18, { coffee: 9, flowers: 9 });
         assert.deepStrictEqual(diffArrivals(prev, next), [
-            { shopId: "coffee", visitors: 4 },
-            { shopId: "flowers", visitors: 4 },
+            { shopId: "coffee", visitors: 4, unitPrice: 6 },
+            { shopId: "flowers", visitors: 4, unitPrice: 6 },
         ]);
+    });
+
+    // SC-M05-QA-002 P1-A：服务端 mutate 先 accrue 后 apply，所以**同一条 Prepare 响应**里
+    // 客人是按旧价入账的，而 view().unitPrice 已是新价。飘字若取本次响应的价，就会显示
+    // 服务端没收的钱（实测界面飘 +7、实际入账 6）。arrivals 的单价必须来自上一份快照。
+    check("本轮客人按**上一份快照**的单价入账，不用本次响应里涨上去的价", () => {
+        const prev = view(1, 1280, 3, { coffee: 3 }, ["coffee"], { coffee: 6 });
+        const next = view(2, 1286, 4, { coffee: 4 }, ["coffee"], { coffee: 7 });
+        assert.deepStrictEqual(diffArrivals(prev, next), [{ shopId: "coffee", visitors: 1, unitPrice: 6 }]);
+        assert.strictEqual(next.shops[0].unitPrice, 7, "夹具本身要让「本次响应里已是新价」成立，否则这条在断言空气");
     });
 
     check("0 到店（空闲轮询）→ 空数组", () => {
@@ -340,7 +359,7 @@ async function main(): Promise<void> {
         const update = recorder.updates[1];
         assert.strictEqual(update.view.coins, 1286);
         assert.strictEqual(update.earnedCoins, 6);
-        assert.deepStrictEqual(update.arrivals, [{ shopId: "coffee", visitors: 1 }]);
+        assert.deepStrictEqual(update.arrivals, [{ shopId: "coffee", visitors: 1, unitPrice: 6 }]);
     });
 
     console.log("[m05-probe] ③ 串行与竞态");
@@ -422,7 +441,7 @@ async function main(): Promise<void> {
         assert.deepStrictEqual(transport.calls, ["mall", "settle"]);
         assert.strictEqual(store.isPaused, false);
         const update = recorder.updates[1];
-        assert.deepStrictEqual(update.arrivals, [{ shopId: "coffee", visitors: 3 }]);
+        assert.deepStrictEqual(update.arrivals, [{ shopId: "coffee", visitors: 3, unitPrice: 6 }]);
         assert.strictEqual(update.view.coins, 1298);
     });
 
@@ -481,11 +500,12 @@ async function main(): Promise<void> {
         assert.strictEqual(recorder.updates.length, 1);
     });
 
-    console.log("[m05-probe] ⑥ 开店与首笔收益的数值形状");
+    console.log("[m05-probe] ⑥ 编排层交出的数值形状（不证验收 1）");
 
-    await checkAsync("开店 → 下一轮结算 → 一位客人归属该店、金币增加、已到店 +1", async () => {
-        // ⚠️ 本用例只验「编排层交出什么数值与 arrivals」。S2→S3 的换图、客人真的走到门口
-        //    属 MallScene/GuestStage，探针不覆盖，证据在实机（docs/M05-经营闭环.md §11.1）。
+    await checkAsync("（仅编排层，不证验收第 1 条）开店 → 下一轮结算：arrivals 归属该店、金币与已到店各 +1", async () => {
+        // ⚠️ 用例名里带「开店 / 金币增加 / 已到店 +1」，但它**不是验收第 1 条的证据**：
+        //    跑的是假 transport，S2→S3 换图、客人真的走到门口都不在这里。
+        //    独立复核 SC-M05-QA-002 P2-B 要求把这层关系写进名字，否则只看名字会误记"验收已过"。
         const transport = new FakeTransport();
         const recorder = new Recorder();
         const store = new MallStore(transport, recorder);
@@ -512,43 +532,46 @@ async function main(): Promise<void> {
         store.tick();
         await flush();
         const update = recorder.updates.at(-1);
-        assert.deepStrictEqual(update?.arrivals, [{ shopId: "coffee", visitors: 1 }]);
+        assert.deepStrictEqual(update?.arrivals, [{ shopId: "coffee", visitors: 1, unitPrice: 6 }]);
         assert.strictEqual(update?.view.coins, 1286, "金币增加");
         assert.strictEqual(update?.view.visitorsServed, 1, "已到店 +1");
         assert.strictEqual(update?.view.dailyVisitorCap, 50, "首次实际产生客人的结算冻结当日上限");
         assert.strictEqual(update?.earnedCoins, 6);
     });
 
-    console.log("[m05-probe] ⑦ 客户端侧的「不给未开业铺位画客人」");
+    console.log("[m05-probe] ⑦ 编排层的 diff 过滤（不证验收 4）");
 
-    await checkAsync("只有 visitors 变动的店才会出客人", async () => {
+    await checkAsync("（仅编排层，不证验收第 4 条）累计值不变的店不会出现在 arrivals 里", async () => {
         // 口径要说清：验收第 4 条「未开业铺位不产生收益、不消耗客流」是**服务端不变量**
-        // （accrue 跳过未开业店），由 internal/game 的 Go 测试保证，探针证不了它。
-        // 探针只能证客户端这一半：**arrivals 只含 visitors 有增量的店**，
-        // 未开业店的累计值不动 ⇒ 天然不会被画上人。实机证据见 §11.1 第 4 行。
+        //（accrue 跳过未开业店），由 internal/game 的 Go 测试保证，探针证不了它。
+        // 探针能证的只有客户端这一半：diffArrivals 只收 delta>0 的店。
+        // ⚠️ 夹具里未开业店的累计值**不能写 0**：写 0 的话"它没出现在 arrivals 里"是夹具
+        //    自己造成的，任何实现都能通过（SC-M05-QA-002 §3a 指出 84b2fa6 没改掉这个根，
+        //    因为 diffArrivals 与 MallStore 根本不读 prepared 字段）。这里给花束一个非零常量。
         const transport = new FakeTransport();
         const recorder = new Recorder();
         const store = new MallStore(transport, recorder);
-        transport.mallResults.push(view(1, 1280, 0, { coffee: 0, flowers: 0 }, ["coffee"]));
+        transport.mallResults.push(view(1, 1280, 3, { coffee: 0, flowers: 5 }, ["coffee"]));
         await store.load();
-        // 连开三轮，客人按服务端轮转顺序只落到咖啡；花束始终未开业，累计恒为 0
+        assert.strictEqual(
+            store.view?.shops.find((s) => s.id === "flowers")?.visitors,
+            5,
+            "花束的累计值必须是非零常量，否则下面「它不在 arrivals 里」又是断言假数据",
+        );
+        // 连开三轮，客人按服务端轮转顺序只落到咖啡；花束这一会话内一个客人没来
         for (let round = 1; round <= 3; round += 1) {
             transport.settleResults.push(
-                result(view(1 + round, 1280 + round * 6, round, { coffee: round, flowers: 0 }, ["coffee"]), 1, 6),
+                result(view(1 + round, 1280 + round * 6, round, { coffee: round, flowers: 5 }, ["coffee"]), 1, 6),
             );
             store.tick();
             await flush();
         }
         const all = recorder.updates.slice(1).flatMap((u) => u.arrivals);
         assert.deepStrictEqual(all, [
-            { shopId: "coffee", visitors: 1 },
-            { shopId: "coffee", visitors: 1 },
-            { shopId: "coffee", visitors: 1 },
+            { shopId: "coffee", visitors: 1, unitPrice: 6 },
+            { shopId: "coffee", visitors: 1, unitPrice: 6 },
+            { shopId: "coffee", visitors: 1, unitPrice: 6 },
         ]);
-        assert.ok(
-            all.every((a) => a.shopId !== "flowers"),
-            "未开业的铺位不得产生客人",
-        );
         assert.strictEqual(store.view?.coins, 1298);
         assert.strictEqual(store.view?.visitorsServed, 3);
     });

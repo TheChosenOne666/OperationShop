@@ -21,6 +21,11 @@
 //                               驱动引擎的 Game.EVENT_HIDE/EVENT_SHOW。
 //                               ⚠️ 这是**合成触发**，不等于真后台（rAF 没被浏览器掐断），
 //                               真机/开发者工具复验才算结案
+//   hud                         读**运行中**界面的 Label 字符串（金币/客流/招牌/在场人数/飘字文本）。
+//                               截图只能看"画面变了没"，看不出"显示的是哪个数"——
+//                               要归因到 HUD 或飘字金额，只有这条能给可核对的读数
+//                               （独立复核 SC-M05-QA-002 P2-E 指的就是这个缺口）。
+//                               全部读数收尾时落盘到 <outDir>/hud-reads.json
 //   wait:<秒>                   等待
 //   reload                      刷新页面（等价于「完全退出小游戏再进入」）
 // 例：
@@ -41,7 +46,41 @@ import { resolve } from "node:path";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const CDP_PORT = 9223;
+/** 设计坐标系（Canvas 中心系），与引擎的设计分辨率一致，用于换算 dx/dy。 */
 const DESIGN = { width: 750, height: 1334 };
+/**
+ * 仿真视口。**必须不小于产物画布的 CSS 尺寸**：`build/web-desktop/index.html` 把
+ * `GameDiv`/`GameCanvas` 写死成 1280×960，`Emulation.setDeviceMetricsOverride` 并不会让它跟着视口缩。
+ * 原先这里给的是 750×1334（想保竖屏比例），结果设计坐标 x>146 的铺位换算出的 CSS 坐标
+ * 落在视口之外，浏览器直接把触摸事件丢掉——客户端一行日志都不打，看着就是"点了没反应"
+ * 的**静默假阴性**（独立复核 SC-M05-QA-002 P1-B）。竖屏构图改用 `clip:` 裁截图保证。
+ */
+const VIEWPORT = { width: 1280, height: 1400 };
+
+/**
+ * 在页面里读**运行时**的 Label 字符串。走 `window.cc`（web-desktop 产物里挂着引擎全局），
+ * 按节点路径取，不猜坐标也不认截图观感。`CoinFloat` 是飘字根节点，文本在它的 `Text` 子节点上。
+ */
+const HUD_READ = `(() => {
+    const C = window.cc;
+    if (!C) return null;
+    const canvas = C.director.getScene().getChildByName('Canvas');
+    const text = (path) => {
+        const node = canvas.getChildByPath(path);
+        const label = node && node.getComponent(C.Label);
+        return label ? label.string : null;
+    };
+    const layer = canvas.getChildByName('GuestLayer');
+    const kids = layer ? layer.children : [];
+    return JSON.stringify({
+        coin: text('Hud/CoinLabel'),
+        visitor: text('Hud/VisitorLabel'),
+        marquee: text('Marquee'),
+        guests: kids.filter((c) => c.name === 'Guest').length,
+        floats: kids.filter((c) => c.name === 'CoinFloat')
+            .map((c) => { const t = c.getChildByName('Text'); return t && t.getComponent(C.Label) ? t.getComponent(C.Label).string : '?'; }),
+    });
+})()`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -135,10 +174,9 @@ async function main() {
         await cdp.send("Log.enable");
         await cdp.send("Page.enable");
         await cdp.send("Network.enable");
-        // 视口给成竖屏 750×1334：与小游戏的真实比例一致，
-        // 免得 FIXED_HEIGHT 把横向视野撑宽、截图里两侧全是空地
+        // 视口见 VIEWPORT 的注释：保 1:1 不缩，否则触点会被视口裁掉
         await cdp.send("Emulation.setDeviceMetricsOverride", {
-            width: DESIGN.width, height: DESIGN.height, deviceScaleFactor: 2, mobile: true,
+            width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: 2, mobile: true,
         });
         await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true });
 
@@ -189,6 +227,22 @@ async function main() {
             return result.value;
         }
 
+        /**
+         * 点击有没有真的送到引擎。`MallScene.onSlotTouched` 的两条分支必打日志
+         * （「铺位 …」或「玩家请求开店：…」），所以等到一条即成立。
+         * 没这道检查的话，触点掉出视口 = 静默假阴性，会被读成"功能没反应"（SC-M05-QA-002 P1-B）。
+         */
+        async function waitTouchDelivered(mark, timeoutMs = 1500) {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                for (let i = mark; i < consoleLines.length; i += 1) {
+                    if (/\[m05\] (铺位|玩家请求开店)/.test(consoleLines[i])) return true;
+                }
+                await sleep(100);
+            }
+            return false;
+        }
+
         /** 点击并回报浏览器侧收到的事件计数——用来区分「坐标算错」与「引擎没接触摸」。 */
         async function probeClick(dx, dy) {
             await evaluate(`(() => {
@@ -208,6 +262,12 @@ async function main() {
 
         /** 非空时后续截图只截这块设计坐标区域（中心 + 宽高）。 */
         let clipDesign = null;
+
+        /** 未送达引擎的点击（触点被视口裁掉 / 坐标算错），收尾统一报出并以非零码退出。 */
+        const silentClicks = [];
+
+        /** 每次 `hud` 步骤的读数，收尾落盘，便于逐条核对「显示值 vs 服务端权威值」。 */
+        const hudReads = [];
 
         async function canvasRect() {
             const value = await evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect();
@@ -256,9 +316,11 @@ async function main() {
                     await sleep(Number(intervalMs));
                 }
                 console.log(`  🎞 连拍 ${sizes.length} 张：${sizes.join(",")}`);
-                // 字节数变化 ≈ 画面内容变了（数字换了字形），指出该看哪几帧
+                // ⚠️ 只能定位"该看哪几帧"，**不能当判据**：客人走位、飘字淡出同样会改字节数，
+                // 归不到 HUD 数字上（独立复核 SC-M05-QA-002 P2-E）。要读显示值就 clip: 到 HUD 再看图，
+                // 或直接读 drive-console.log 里「应用 … 金币=… 已到店=…」那行权威值。
                 const changed = sizes.map((s, i) => (i && s !== sizes[i - 1] ? i : -1)).filter((i) => i > 0);
-                console.log(`     字节数变化的帧号：${changed.length ? changed.join(",") : "无（这段时间画面没变）"}`);
+                console.log(`     画面有变化的帧号（不可归因到 HUD）：${changed.length ? changed.join(",") : "无（这段时间画面没变）"}`);
             } else if (kind === "clip") {
                 clipDesign = rest.map(Number);
                 console.log(`  ✂️ 后续截图裁剪到设计区域 中心(${clipDesign[0]},${clipDesign[1]}) ${clipDesign[2]}×${clipDesign[3]}`);
@@ -275,14 +337,32 @@ async function main() {
                     return 1;
                 })()`);
                 console.log(`  🌓 合成 visibilitychange → ${state}（引擎会 emit EVENT_${hidden ? "HIDE" : "SHOW"}）`);
+            } else if (kind === "hud") {
+                const raw = await evaluate(HUD_READ);
+                if (!raw) {
+                    // 读不到引擎全局就没法归因，这条读数不能当证据——直接非零退出，别静默过去
+                    console.log("  📊 HUD 读数：页面里没有 window.cc，产物可能不是 web-desktop");
+                    process.exitCode = 1;
+                } else {
+                    const h = JSON.parse(raw);
+                    hudReads.push(h);
+                    console.log(`  📊 金币=${h.coin} 客流=${h.visitor} 招牌=${h.marquee} 在场=${h.guests} 人 飘字=${JSON.stringify(h.floats)}`);
+                }
             } else if (kind === "wait") {
                 const secs = Number(rest.join(":"));
                 console.log(`  ⏳ 等待 ${secs}s`);
                 await sleep(secs * 1000);
             } else if (kind === "click") {
                 const [label, dx, dy] = rest;
+                const mark = consoleLines.length;
                 const at = await clickDesign(Number(dx), Number(dy));
                 console.log(`  👆 点击 ${label} 设计(${dx},${dy}) → CSS(${at.x.toFixed(0)},${at.y.toFixed(0)})`);
+                if (await waitTouchDelivered(mark)) {
+                    console.log("     ✔ 引擎已收到（控制台出现了 [m05] 点击日志）");
+                } else {
+                    silentClicks.push(`${label} 设计(${dx},${dy}) → CSS(${at.x.toFixed(0)},${at.y.toFixed(0)})`);
+                    console.log("     ❌ 1.5s 内没有任何 [m05] 点击日志：事件没送到引擎。这是驱动器的问题，不是功能的问题");
+                }
             } else if (kind === "probe") {
                 const [label, dx, dy] = rest;
                 await probeClick(Number(dx), Number(dy));
@@ -298,10 +378,16 @@ async function main() {
         // 顺带把控制台与异常落盘，作为可复核的证据
         writeFileSync(`${outDir}/drive-console.log`, consoleLines.join("\n") + "\n", "utf8");
         writeFileSync(`${outDir}/drive-exceptions.log`, exceptions.join("\n") + "\n", "utf8");
+        writeFileSync(`${outDir}/hud-reads.json`, JSON.stringify(hudReads, null, 2) + "\n", "utf8");
         console.log(`[m05-drive] 控制台 ${consoleLines.length} 行、异常 ${exceptions.length} 条`);
         if (exceptions.length) {
             console.log("[m05-drive] ⚠️ 有未捕获异常：");
             for (const e of exceptions) console.log(`  - ${e}`);
+            process.exitCode = 1;
+        }
+        if (silentClicks.length) {
+            console.log(`[m05-drive] ⚠️ ${silentClicks.length} 次点击未送达引擎——假阴性，别据此判「点了没反应」：`);
+            for (const s of silentClicks) console.log(`  - ${s}`);
             process.exitCode = 1;
         }
     } finally {

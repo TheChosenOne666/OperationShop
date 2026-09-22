@@ -53,7 +53,7 @@ function request<T>(method: string, path: string): Promise<T> {
 /** 规则与数值配置。启动时取一次即可（改了它服务端会拒绝旧存档，见 ADR 0004）。 */
 export const fetchConfig = () => request<Config>("GET", "/api/v1/config");
 
-/** 商场全量快照。切回前台时拉一次（B3.6）。 */
+/** 商场全量快照。只在启动首帧拉一次（B3.6「打开游戏：拉一次」）；回前台走 `settle`，因为快照不结算收益。 */
 export const fetchMall = () => request<MallView>("GET", "/api/v1/mall");
 
 /**

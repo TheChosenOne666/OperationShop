@@ -18,10 +18,18 @@ import type { MallView, Result } from "./ApiTypes";
 /** 一次请求的来源，只用于日志与表现分层。 */
 export type StoreOp = "snapshot" | "settle" | "prepare";
 
-/** 本轮结算里客人的归属：某店来了几位。由两份快照的 shops[].visitors 相减得出。 */
+/** 本轮结算里客人的归属：某店来了几位、按什么价入账。由两份快照的 shops[].visitors 相减得出。 */
 export interface Arrival {
     shopId: string;
     visitors: number;
+    /**
+     * 这批客人**入账时**的单价，取上一份快照里该店的 `unitPrice`，不是本次响应的。
+     * 同一条 Prepare/Upgrade 响应里两者可以不同：服务端 `mutate` 先 `accrue` 后 `apply`
+     * （`internal/game/service.go:436-441`），客人按加价前的价记账，而 `view()` 在 apply
+     * 之后才取 `unitPrice`（`:675`），于是响应里给的是加价后的新价。
+     * 表现层若用后者，会显示成"客人付了服务端没收的钱"（独立复核 SC-M05-QA-002 P1-A）。
+     */
+    unitPrice: number;
 }
 
 /** 交给界面层的一次更新。数值一律以 view 为准，arrivals 只驱动表现。 */
@@ -71,7 +79,9 @@ export function diffArrivals(prev: MallView | null, next: MallView): Arrival[] {
         if (!before) continue;
         const delta = shop.visitors - before.visitors;
         if (delta > 0) {
-            arrivals.push({ shopId: shop.id, visitors: delta });
+            // 单价取 before（上一份已应用快照）而不是 next：这批客人是在 baseline → 本次响应
+            // 这段区间内入账的，服务端用的正是 baseline 时刻的价。见 Arrival.unitPrice 的注释。
+            arrivals.push({ shopId: shop.id, visitors: delta, unitPrice: before.unitPrice });
         } else if (delta < 0) {
             // 累计值倒退只可能是换档或服务端异常：不生成客人，但必须留痕。
             console.error(`[m05] 店铺 ${shop.id} 累计客流倒退 ${before.visitors} → ${shop.visitors}，已忽略`);
@@ -205,7 +215,14 @@ export class MallStore {
                 // 失败不清空界面、不打断节拍：界面保留最后一次成功值，下一轮照常。
                 const code = errorCode(err);
                 console.error(`[m05] ${op} 请求失败：${code}`, err);
-                this.observer.onStoreError(code, op);
+                // 出错路径上的 observer 也得兜住：`tick()`/`onGameShow` 是 `void` 丢弃返回值的，
+                // 让它 reject 就成了 unhandled rejection，日志里看着像界面层的错却指不到这次请求
+                // （独立复核 SC-M05-QA-002 P2-G）。
+                try {
+                    this.observer.onStoreError(code, op);
+                } catch (observerErr) {
+                    console.error(`[m05] onStoreError(${code}) 自身抛异常，已忽略`, observerErr);
+                }
             } finally {
                 this.inFlight -= 1;
             }

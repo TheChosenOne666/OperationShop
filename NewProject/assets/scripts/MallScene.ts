@@ -425,9 +425,19 @@ export class MallScene extends Component {
 
         const visitor = this.node.getChildByPath("Hud/VisitorLabel")?.getComponent(Label);
         if (visitor) {
-            // dailyVisitorCap 为 null 表示当天还没冻结，显示 — 而不是假的 0（与 Boot 同口径）。
-            const cap = view.dailyVisitorCap === null ? "—" : String(view.dailyVisitorCap);
-            rollNumber(visitor, view.visitorsServed, (n) => `${n}/${cap}`);
+            // 未冻结（`dailyVisitorCap` 为 null）时整槽显示 `— / —`、不显示分子——
+            // 此刻的 `visitorsServed` 恒为 0，显示成 `0/—` 会被读成"今天还没客人、上限未知"，
+            // 而真实语义是"上限尚不适用"（《系统-经营与成长》§6.1；主理人 2026-09-21 裁定，
+            // 见 `docs/architecture/架构现状.md` §7.2 冲突 L）。
+            const cap = view.dailyVisitorCap;
+            if (cap === null) {
+                // 必须先停补间再改串：跨 0 点那一轮上限从有值变回 null，
+                // 在飞的 tween 会在 onUpdate 里把数字写回来，占位串撑不到下一帧。
+                stopRoll(visitor);
+                visitor.string = "— / —";
+            } else {
+                rollNumber(visitor, view.visitorsServed, (n) => `${n}/${cap}`);
+            }
         }
     }
 

@@ -62,23 +62,19 @@ export class GuestStage {
 
     /**
      * 按本轮到店归属生成客人。arrivals 来自 MallStore 对服务端累计计数做的差，
-     * 本层不做任何数值推算（ADR 0001）。
+     * 本层不做任何数值推算（ADR 0001）；每位客人的飘字金额直接用 arrival 携带的
+     * **入账时**单价，不从本次响应的 `unitPrice` 现取（理由见 `Arrival.unitPrice` 注释）。
      */
     spawn(update: StoreUpdate): void {
         const queue: Array<{ slot: Node; unitPrice: number }> = [];
         for (const arrival of update.arrivals) {
             const slot = this.shopSlots.get(arrival.shopId);
-            const shop = update.view.shops.find((s) => s.id === arrival.shopId);
             if (!slot) {
                 console.error(`[m05] 找不到店铺 ${arrival.shopId} 对应的铺位节点，本轮 ${arrival.visitors} 位客人无处可去`);
                 continue;
             }
-            if (!shop) {
-                console.error(`[m05] 快照里没有店铺 ${arrival.shopId}，无法取单价做飘字`);
-                continue;
-            }
             for (let i = 0; i < arrival.visitors; i += 1) {
-                queue.push({ slot, unitPrice: shop.unitPrice });
+                queue.push({ slot, unitPrice: arrival.unitPrice });
             }
         }
         if (queue.length === 0) return;
@@ -159,7 +155,7 @@ export class GuestStage {
         return node;
     }
 
-    /** 店铺位置的金币飘字：ico_coin + 「+单价」。单价直接取服务端字段，不做乘法（ADR 0001）。 */
+    /** 店铺位置的金币飘字：ico_coin + 「+单价」。单价是服务端给的本批客人入账价，本层不做乘法（ADR 0001）。 */
     private spawnCoinFloat(at: Vec3, unitPrice: number): void {
         const root = new Node("CoinFloat");
         this.layer.addChild(root);

@@ -42,12 +42,14 @@ export class Boot extends Component {
 
     /**
      * 客流按需求文档 §6.1 的口径显示为「已到店 / 上限」。
-     * dailyVisitorCap 为 null 表示当天还没冻结、上限尚不适用——这时**不能**显示成 0，
-     * 否则 HUD 会闪出一个假的 0/0。
+     * dailyVisitorCap 为 null 表示当天还没冻结、上限尚不适用——这时整槽显示 `— / —`，
+     * 不显示分子（显示 0 会被读成"今天还没客人"；主理人 2026-09-21 裁定，见架构现状 §7.2 冲突 L）。
+     * 与 MallScene.renderHud 同口径。
      */
     private render(mall: MallView): void {
         const cap = mall.dailyVisitorCap === null ? "—" : String(mall.dailyVisitorCap);
-        this.write(`金币 ${mall.coins}　客流 ${mall.visitorsServed}/${cap}`);
+        const served = mall.dailyVisitorCap === null ? "—" : String(mall.visitorsServed);
+        this.write(`金币 ${mall.coins}　客流 ${served}/${cap}`);
     }
 
     private showError(err: unknown): void {
