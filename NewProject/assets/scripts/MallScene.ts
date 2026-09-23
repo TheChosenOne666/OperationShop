@@ -21,6 +21,8 @@ import { GuestStage } from "./GuestStage";
 import type { GuestArt } from "./GuestStage";
 import { MallPages } from "./MallPages";
 import type { PageName } from "./MallPages";
+import { MallPopups } from "./MallPopups";
+import { errorText } from "./MallErrors";
 import { rollNumber, stopRoll } from "./NumberRoll";
 
 const { ccclass } = _decorator;
@@ -85,12 +87,12 @@ export class MallScene extends Component {
     private effect: EffectAsset | null = null;
     private store: MallStore | null = null;
     private guests: GuestStage | null = null;
-    /** M06 页面层（经营页 / 布局页）。节点由它自己建，场景只喂快照与意图。 */
-    private pages: MallPages | null = null;
     /** 三个导航钮的基线 y，绑定时记一次，供按下态来回挪。 */
     private readonly navBaseline = new Map<string, number>();
-    /** M06 页面层（经营页 / 布局页）。节点由它自己建，场景只负责喂快照与接意图。 */
+    /** M06 页面层（经营页 / 布局页）。节点由它自己建，场景只喂快照与意图。 */
     private pages: MallPages | null = null;
+    /** M06 弹窗层（详情 / 解锁确认 / 升级确认）。同样自己建节点，必须**在页面层之后**创建才盖得住页面。 */
+    private popups: MallPopups | null = null;
     /** 招牌原文。错误横幅要占这块地方，成功后得还原回去。 */
     private marqueeText = "";
 
@@ -111,6 +113,9 @@ export class MallScene extends Component {
             this.bindSlotInput(cfg);
             this.buildGuestStage(cfg);
             this.buildPages(cfg);
+            // ⚠️ 顺序有意义：弹窗层的遮罩要盖在页面之上，而同层节点的绘制按兄弟次序来，
+            // 所以必须在 buildPages 之后创建 Overlay。
+            this.buildPopups(cfg);
 
             // 传输层直接复用 ApiClient 的五个函数；界面层就是本组件 + 页面层。
             this.store = new MallStore({ fetchMall, settle, prepareShop, upgradeShop, unlockSlot }, {
@@ -137,6 +142,7 @@ export class MallScene extends Component {
         game.off(Game.EVENT_SHOW, this.onGameShow, this);
         this.guests?.dispose();
         this.pages?.dispose();
+        this.popups?.dispose();
         for (const path of ["Hud/CoinLabel", "Hud/VisitorLabel"]) {
             const label = this.node.getChildByPath(path)?.getComponent(Label);
             if (label) stopRoll(label);
@@ -154,23 +160,28 @@ export class MallScene extends Component {
         this.render(update.view);
         this.clearError();
         this.guests?.spawn(update);
+        // 解锁 / 升级的回执：弹窗读的是**这条响应里的新快照**（上面 render 已完成），
+        // 这里只把确认层关掉，详情留在原地显示变化后的档位。不再额外拉一次快照（验收第 9 条）。
+        if (update.op === "unlock" || update.op === "upgrade") this.popups?.acknowledgeWrite();
         // 注意口径：MallStore 那条日志的「本轮到店」是**人数**，这里的是**几家店**，别说成同一个量。
         console.log(`[m05] 界面已更新 revision=${update.view.revision} 来源=${update.op} 到店涉及 ${update.arrivals.length} 家`);
     }
 
     /**
-     * 一次失败的响应：**只挂横幅，不动数值**——金币与客流保留最后一次成功值。
+     * 一次失败的响应：**只挂提示，不动数值**——金币与客流保留最后一次成功值。
      * 轮询模式下失败是常态化的瞬时事件，盖掉数字本身就会被看成"金币跳变"（验收第 3 条）。
      */
     private onStoreError(code: string, op: StoreOp): void {
         if (!this.isValid) return;
         const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
-        // 只按稳定错误码分支，不匹配服务端的中文提示（ADR 0001 同口径）。
-        const transport = code === "NETWORK" || code === "TIMEOUT" || code.indexOf("HTTP_") === 0;
-        const text = `${transport ? "连接中断" : "操作失败"} ${code}`;
+        // 只按稳定错误码分支，不匹配服务端返回的中文提示（ADR 0001 同口径）。
+        // 文案逐条对表见 `MallErrors.ERROR_TEXT`（验收第 8 条要求的"错误码逐个映射"）。
+        const text = errorText(code);
         if (marquee) marquee.string = text;
-        // 页面盖在招牌之上，同一条信息要落到页内提示位，否则在经营页/布局上看不到失败（验收第 8 条）
+        // 页面与弹窗都盖在招牌之上，同一条信息要落到它们自己的提示位，否则玩家看不到失败
         this.pages?.notify(text);
+        this.popups?.notify(text);
+        if (op === "unlock" || op === "upgrade") this.popups?.rejectWrite();
         // 定时自清，不能只等"下一次成功"来清：见 clearError 的注释
         this.unschedule(this.clearError);
         this.scheduleOnce(this.clearError, ERROR_BANNER_SECONDS);
@@ -187,6 +198,7 @@ export class MallScene extends Component {
         const marquee = this.node.getChildByPath("Marquee")?.getComponent(Label);
         if (marquee && this.marqueeText) marquee.string = this.marqueeText;
         this.pages?.notify(null);
+        this.popups?.notify(null);
     };
 
     /** 启动阶段就失败（Bundle 或 config 取不到）：这时还没有任何权威数值可保留。 */
@@ -374,14 +386,34 @@ export class MallScene extends Component {
         console.log(`[m06] 当前页=${page}`);
     }
 
-    /** 店铺详情弹窗（M06 任务 6）。现在只出声，接线时改这一处即可。 */
-    private askDetail(shopId: string): void {
-        console.log(`[m06] 请求打开店铺详情：${shopId}（弹窗属任务 6，尚未接上）`);
+    /**
+     * 建弹窗层（稿 04/05/06）。与页面层同样的分工：弹窗只报意图，命令由这里发给 MallStore，
+     * 数字等响应里的新快照回来再渲染（ADR 0001）。
+     * ⚠️ 必须在 `buildPages` 之后调用：Overlay 靠兄弟次序盖在页面之上，早建就被页面挡住点击。
+     * 本函数在 `this.store` 创建之前跑，所以回调里全是取用时再判空。
+     */
+    private buildPopups(cfg: Config): void {
+        this.popups = new MallPopups({
+            root: this.node,
+            config: cfg,
+            frame: (bundleName, framePath) => this.frames.get(frameKey(bundleName, framePath)) ?? null,
+            handlers: {
+                onAskUpgrade: (shopId) => this.popups?.openUpgrade(shopId),
+                // 两笔花钱的命令走同一条串行链：点下去最多等一个在飞的轮询，不会被吞掉
+                onConfirmUnlock: (slotId) => void this.store?.unlock(slotId),
+                onConfirmUpgrade: (shopId) => void this.store?.upgrade(shopId),
+            },
+        });
     }
 
-    /** 解锁确认弹窗（M06 任务 6）。按钮的禁用态已在页面层拦掉，这里收到的一定是买得起的。 */
+    /** 店铺详情弹窗（稿 04）。数据由弹窗层自己从最近一次快照里取，场景只给"开哪一家"。 */
+    private askDetail(shopId: string): void {
+        this.popups?.openDetail(shopId);
+    }
+
+    /** 解锁确认弹窗（稿 05）。页面层的按钮禁用态已拦掉买不起的情况，弹窗还会再核一次现场金币。 */
     private askUnlock(slotId: string): void {
-        console.log(`[m06] 请求解锁铺位：${slotId}（确认弹窗属任务 6，尚未接上）`);
+        this.popups?.openUnlock(slotId);
     }
 
     // ---------- 资源 ----------
@@ -479,8 +511,9 @@ export class MallScene extends Component {
     private render(view: MallView): void {
         this.renderSlots(view);
         this.renderHud(view);
-        // 页面层自己判可见性：停在主界面时它不动画任何节点
+        // 页面与弹窗层自己判可见性：停在主界面、且没开弹窗时它们都不动一个节点
         this.pages?.render(view);
+        this.popups?.render(view);
     }
 
     private renderSlots(view: MallView): void {

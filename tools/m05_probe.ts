@@ -22,6 +22,7 @@
 //     故 ⑦ 改用「未开业店累计值取非零常量」让那条断言真的可能失败。）
 import assert from "node:assert";
 import { diffArrivals, MallStore } from "../NewProject/assets/scripts/MallStore.ts";
+import { ERROR_TEXT, errorText } from "../NewProject/assets/scripts/MallErrors.ts";
 import type { Arrival, StoreOp, StoreObserver, StoreTransport, StoreUpdate } from "../NewProject/assets/scripts/MallStore.ts";
 import type { MallView, Result } from "../NewProject/assets/scripts/ApiTypes.ts";
 
@@ -680,6 +681,48 @@ async function main(): Promise<void> {
         assert.strictEqual(update?.view.shops[0].unitPrice, 7, "界面档位用本次响应的新价");
         assert.strictEqual(update?.view.shops[0].nextUnitPrice, 8, "升级预告的下一级单价同样来自响应");
         assert.deepStrictEqual(update?.arrivals, [{ shopId: "coffee", visitors: 1, unitPrice: 6 }], "飘字用入账时的旧价");
+    });
+
+    // ---------- M06 任务 6/7：错误码逐个映射（验收第 8 条） ----------
+
+    console.log("[m05-probe] ⑨ 错误码 → 玩家可读提示（MallErrors，无 cc 依赖）");
+
+    check("验收第 8 条点名的六个码逐个有提示，且互不相同", () => {
+        const named = ["INSUFFICIENT_COINS", "MAX_LEVEL", "SLOT_LOCKED", "SLOT_ORDER", "SHOP_NOT_OPEN", "SHOP_NOT_FOUND"];
+        const texts = named.map((code) => {
+            // 必须**在表里**：少了这条，漏配的码会落到兜底串上，而兜底串也是一句像样的中文
+            assert.ok(Object.prototype.hasOwnProperty.call(ERROR_TEXT, code), `${code} 没进映射表，会落到兜底串`);
+            return errorText(code);
+        });
+        for (const [index, text] of texts.entries()) {
+            assert.ok(text.length > 0, `${named[index]} 没有提示文案`);
+            assert.notStrictEqual(text, named[index], `${named[index]} 的提示退化成了错误码本身`);
+        }
+        assert.strictEqual(new Set(texts).size, named.length, "两个码共用了同一句提示，玩家分不出原因");
+    });
+
+    check("服务端会返回的其余码也在表内（新增码漏配要在这里红）", () => {
+        // 这份清单逐条对 internal/api/handler.go 的 writeError；服务端加码而界面没配，
+        // 就会落到「操作未生效 XXX」那条兜底串上——验收第 8 条要求的是逐个映射，不是兜底。
+        for (const code of ["CLOCK_BACKWARDS", "NUMERIC_LIMIT", "SAVE_FAILED", "UNAUTHORIZED"]) {
+            assert.ok(Object.prototype.hasOwnProperty.call(ERROR_TEXT, code), `${code} 没进映射表`);
+        }
+    });
+
+    check("传输层失败归一类提示，未预期的码保留原始码", () => {
+        assert.strictEqual(errorText("NETWORK"), errorText("HTTP_502"));
+        assert.match(errorText("HTTP_404"), /连接/);
+        // 陌生码不许显示成一句假装解释过的空话：保留码本身才排查得了
+        assert.strictEqual(errorText("SOMETHING_NEW"), "操作未生效 SOMETHING_NEW");
+    });
+
+    check("表内每个码给的都是中文可读提示，不甩错误码", () => {
+        // 验收第 8 条要的是「映射为玩家可读提示」。稿上禁的是把禁用按钮画成红色（形状/色值层面），
+        // 不在文案里，所以这里只验"能不能读懂"这一层：有中文、不含码本身。
+        for (const [code, text] of Object.entries(ERROR_TEXT)) {
+            assert.ok(/[一-龥]/.test(text), `${code} 的提示没有中文成分：${text}`);
+            assert.ok(!text.includes(code), `${code} 的提示里混进了错误码本身：${text}`);
+        }
     });
 
     // ---------- 汇总 ----------

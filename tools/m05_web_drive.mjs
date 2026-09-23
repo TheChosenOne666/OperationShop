@@ -21,16 +21,25 @@
 //                               驱动引擎的 Game.EVENT_HIDE/EVENT_SHOW。
 //                               ⚠️ 这是**合成触发**，不等于真后台（rAF 没被浏览器掐断），
 //                               真机/开发者工具复验才算结案
-//   hud                         读**运行中**界面的 Label 字符串（金币/客流/招牌/在场人数/飘字文本）。
+//   hud                         读**运行中**界面的 Label 字符串（金币/客流/招牌/在场人数/飘字文本，
+//                               以及 M06 的三页与三弹窗：经营页各行、布局页卡片与主按钮、
+//                               弹窗的状态/构成/金币账/按钮文字+不透明度+角标显隐）。
 //                               截图只能看"画面变了没"，看不出"显示的是哪个数"——
 //                               要归因到 HUD 或飘字金额，只有这条能给可核对的读数
 //                               （独立复核 SC-M05-QA-002 P2-E 指的就是这个缺口）。
-//                               全部读数收尾时落盘到 <outDir>/hud-reads.json
+//                               禁用态的三重编码由这三列一起证：文字串（文字通道）、
+//                               opacity（明度通道）、corner 有无（形状通道，弹窗层把
+//                               「画没画角标」落到节点 active 上，Graphics 画了什么读不出来）。
+//                               全部读数收尾落盘到 <outDir>/hud-reads.json
+//   reqs:<标签>                 报「自上一次 reqs 以来发了几个 /api/v1/ 请求」，并单列其中几个是写命令。
+//                               M06 两条判据只能靠它：验收第 9 条（切页与开合弹窗不额外发请求）、
+//                               验收第 5/6/7 条（禁用态点了**不发写命令**）。
+//                               收尾落盘 <outDir>/api-requests.json
 //   wait:<秒>                   等待
 //   reload                      刷新页面（等价于「完全退出小游戏再进入」）
 // 例：
-//   node tools/m05_web_drive.mjs http://127.0.0.1:8123 .work/qa-m05 \
-//        shot:01-initial click:f1-s1:-180.5:-156.5 wait:1 shot:02-opened wait:12 shot:03-polling
+//   node tools/m05_web_drive.mjs http://127.0.0.1:8123 .work/qa-m06 \
+//        reqs:启动 hud click:经营:-96:-520 reqs:切页 hud
 //
 // 坐标换算依据：设计分辨率 750×1334、policy 3（FIXED_HEIGHT）。
 // ⚠️ 关键：**以 canvas 元素中心为原点**，不是左边缘。FIXED_HEIGHT 把高度锁定为 1334、
@@ -119,8 +128,7 @@ const HUD_READ = `(() => {
             actionCost: at('Action/Cost'),
             actionDim: (() => {
                 const a = layout.getChildByName('Action');
-                const o = a && a.getComponent(C.UIOpacity);
-                return o ? o.opacity : 255;
+                return opacityOf(a);
             })(),
             notice: activeOf(layout, 'Notice') ? text('PageLayout/Notice') : '',
             // 铺位卡挂在各楼层的 Slots<层> 容器下，卡名是 Card-<铺位id>
@@ -133,6 +141,107 @@ const HUD_READ = `(() => {
                 }))),
         };
     };
+
+    // ---------- M06 弹窗层读数（稿 04 / 05 / 06） ----------
+    // 与页面层同一道理：只读**当前可见**那一层。确认弹窗盖在详情之上时，底下的详情读到的是
+    // 残值，混进证据里就会把"上一屏的数字"当成"这一屏显示的数"。
+    const overlay = canvas.getChildByName('Overlay');
+    const popupOf = (name) => {
+        const node = overlay && overlay.getChildByName(name);
+        return node && node.active ? node : null;
+    };
+    const inPanel = (root) => (path) => {
+        if (!root) return null;
+        const node = root.getChildByPath(path);
+        const label = node && node.getComponent(C.Label);
+        return label ? label.string : null;
+    };
+    const CONTENT = 'Inner/Content/';
+    const detail = popupOf('PopupDetail');
+    const unlock = popupOf('PopupUnlock');
+    const upgrade = popupOf('PopupUpgrade');
+    // 三通道编码的取证：文字串 + 不透明度（明度）+ 角标节点是否可见（形状）。
+    // Graphics 画了什么读不出来，所以弹窗层把"有没有角标"落到 active 上，这一列才归因得到形状通道。
+    //
+    // ⚠️ 明度这一列要**三种取法依次试**，因为产物里前两种都拿不到（2026-09-23 实测）：
+    //   ① window.cc.UIOpacity → undefined（全局命名空间没导出这个类）；
+    //   ② getComponent("UIOpacity") → null（类名被压缩成 e，按名注册表也查不到）；
+    //   ③ 只剩按"有没有数值型 opacity 字段"去认那个组件。
+    // 早先只写 ① 并把读不到当成默认值 255，等于把禁用态的 78% 白验了一遍——所以取不到
+    // 一律报 null，不许报默认值。
+    const opacityOf = (node) => {
+        if (!node) return null;
+        const byClass = C.UIOpacity ? node.getComponent(C.UIOpacity) : null;
+        if (byClass) return byClass.opacity;
+        const byName = node.getComponent("UIOpacity");
+        if (byName) return byName.opacity;
+        const duck = (node.components || []).find((c) => c && typeof c.opacity === "number");
+        return duck ? duck.opacity : null;
+    };
+    const buttonRead = (root, path) => {
+        if (!root) return null;
+        const node = root.getChildByPath(path);
+        if (!node) return null;
+        const corner = node.getChildByName('Corner');
+        return {
+            text: node.getChildByName('Text').getComponent(C.Label).string,
+            opacity: opacityOf(node),
+            corner: corner && corner.active ? '有' : '无',
+        };
+    };
+    // ⚠️ 这一段整块在模板字符串里，内部一律用 + 拼接，不许出现反引号
+    const readDetail = () => {
+        if (!detail) return null;
+        const at = inPanel(detail);
+        return {
+            name: at(CONTENT + 'Head/Name'),
+            level: at(CONTENT + 'Head/LevelBadge/Level'),
+            status: at(CONTENT + 'Head/Status') + (activeOf(detail, CONTENT + 'Head/Tick') ? '' : '（无对勾）'),
+            price: at(CONTENT + 'KvPrice/Value'),
+            formula: at(CONTENT + 'Formula/Text'),
+            visitors: at(CONTENT + 'KvVisitors/Value'),
+            revenue: at(CONTENT + 'KvRevenue/Value'),
+            preview: activeOf(detail, CONTENT + 'Preview')
+                ? at(CONTENT + 'Preview/KvLevel/Key') + ' ' + at(CONTENT + 'Preview/KvLevel/Value')
+                    + ' / 花费 ' + at(CONTENT + 'Preview/KvCost/Value')
+                : '隐藏',
+            ghost: buttonRead(detail, CONTENT + 'Buttons/Ghost'),
+            primary: buttonRead(detail, CONTENT + 'Buttons/Primary'),
+        };
+    };
+    const readUnlock = () => {
+        if (!unlock) return null;
+        const at = inPanel(unlock);
+        const money = (i) => at(CONTENT + 'Money/Row' + i + '/Value');
+        return {
+            subtitle: at(CONTENT + 'Subtitle'),
+            cost: money(0), coins: money(1), balance: money(2),
+            lines: [0, 1, 2].map((i) => at(CONTENT + 'Change/Line' + i)),
+            before: at(CONTENT + 'Pair/BeforeText'),
+            after: at(CONTENT + 'Pair/AfterText'),
+            ghost: buttonRead(unlock, CONTENT + 'Buttons/Ghost'),
+            primary: buttonRead(unlock, CONTENT + 'Buttons/Primary'),
+        };
+    };
+    const readUpgrade = () => {
+        if (!upgrade) return null;
+        const at = inPanel(upgrade);
+        const money = (i) => at(CONTENT + 'Money/Row' + i + '/Value');
+        return {
+            title: at(CONTENT + 'Title'),
+            levels: at(CONTENT + 'Levels/From/Text') + '→' + at(CONTENT + 'Levels/To/Text'),
+            now: at(CONTENT + 'Price/Now/Value') + '（' + at(CONTENT + 'Price/Now/Note') + '）',
+            next: at(CONTENT + 'Price/Next/Value') + '（' + at(CONTENT + 'Price/Next/Note') + '）',
+            delta: at(CONTENT + 'Delta'),
+            cost: money(0), coins: money(1), balance: money(2),
+            rule: at(CONTENT + 'Rule/Text'),
+            ghost: buttonRead(upgrade, CONTENT + 'Buttons/Ghost'),
+            primary: buttonRead(upgrade, CONTENT + 'Buttons/Primary'),
+        };
+    };
+    const notice = overlay && overlay.getChildByName('Notice');
+    const popupNotice = notice && notice.active ? notice.getChildByName('Text').getComponent(C.Label).string : '';
+    const popup = detail ? '详情' : unlock ? '解锁确认' : upgrade ? '升级确认' : '无';
 
     // 可点节点在 Canvas 中心系下的坐标：click 步骤要的就是这个坐标系，
     // 从运行时量出来比我按稿面推算一遍可靠（节点位置由场景/代码设定，可能与我读稿的理解不符）。
@@ -149,7 +258,26 @@ const HUD_READ = `(() => {
         for (let i = 0; i < rows; i += 1) clickable[\`\${page}/List/Row\${i}/OpenButton\`] = anchor(\`\${page}/List/Row\${i}/OpenButton\`);
         if (page === 'PageLayout') clickable['PageLayout/Action'] = anchor('PageLayout/Action');
     }
+    // 弹窗的触点只在开着时量：关着时那些节点 inactive，报出来的坐标会指到看不见的按钮上
+    for (const [node, name] of [[detail, 'PopupDetail'], [unlock, 'PopupUnlock'], [upgrade, 'PopupUpgrade']]) {
+        if (!node) continue;
+        for (const key of ['Buttons/Primary', 'Buttons/Ghost']) {
+            clickable[\`\${name}/\${key}\`] = anchor(\`Overlay/\${name}/Inner/Content/\${key}\`);
+        }
+        clickable[\`\${name}/Close\`] = anchor(\`Overlay/\${name}/Close\`);
+    }
+    if (overlay && overlay.active) clickable['Scrim'] = anchor('Overlay/Scrim');
     return JSON.stringify({
+        // 引擎类可用性自检：功能裁剪会把类从产物里整个拿掉（cc.Graphics 曾经就是这样
+        // 让整页建不起来，见 docs/M06 §10.1-2）。读数前先确认类在，否则"读到默认值"
+        // 会被当成"界面正常"。
+        engine: {
+            Label: Boolean(C.Label),
+            // 产物里这一列是 false（见 buttonRead 的注释）：读数改用 getComponent("UIOpacity")
+            UIOpacity: Boolean(C.UIOpacity),
+            Graphics: Boolean(C.Graphics),
+            Sprite: Boolean(C.Sprite),
+        },
         coin: text('Hud/CoinLabel'),
         visitor: text('Hud/VisitorLabel'),
         marquee: text('Marquee'),
@@ -159,6 +287,11 @@ const HUD_READ = `(() => {
         page: manage ? 'manage' : layout ? 'layout' : 'home',
         manage: readManage(),
         layout: readLayout(),
+        popup,
+        popupNotice,
+        detail: readDetail(),
+        unlock: readUnlock(),
+        upgrade: readUpgrade(),
         clickable,
     });
 })()`;
@@ -231,6 +364,12 @@ async function main() {
     const userData = `${outDir}/chrome-profile`;
     const consoleLines = [];
     const exceptions = [];
+    /** `/api/v1/...` 的调用台账，见下面 Network 监听处为什么要记它。 */
+    const apiCalls = [];
+    /** 上一次 `reqs` 步骤落在台账里的位置，用来报「这一步以来发了几个请求」。 */
+    let reqsMark = 0;
+    /** 每个 `reqs` 步骤的差值读数，收尾落盘。 */
+    const reqsSteps = [];
 
     const chrome = spawn(CHROME, [
         "--headless=new",
@@ -277,6 +416,21 @@ async function main() {
                 consoleLines.push(`[${p.entry.source}] ${p.entry.level}: ${p.entry.text}`);
             }
         });
+        /**
+         * 接口调用台账（`reqs` 步骤与收尾都读它）。M06 有两条判据只能靠它证：
+         *   · 验收第 9 条「切页、开合弹窗都不额外发请求」——节拍仍是每 5 秒一次 settle；
+         *   · 验收第 5/6/7 条「禁用态点了**不发写命令**」——按钮点了但台账里不许出现
+         *     对应的 POST，光看客户端日志容易把「打了日志」当成「发了请求」。
+         */
+        cdp.on("Network.requestWillBeSent", (p) => {
+            const url = p.request.url ?? "";
+            const at = url.indexOf("/api/v1/");
+            if (at < 0) return;
+            // CORS 预检由浏览器自己发，不算"客户端多发了一个请求"，计入会把
+            // 验收第 9 条（切页与开合弹窗不额外发请求)的读数整整翻一倍。
+            if (p.request.method === "OPTIONS") return;
+            apiCalls.push({ method: p.request.method, path: url.slice(at + 5), at: Date.now() });
+        });
 
         await cdp.send("Page.navigate", { url });
         await sleep(6000);   // 引擎启动 + Bundle 加载 + 首轮取数
@@ -313,15 +467,15 @@ async function main() {
         }
 
         /**
-         * 点击有没有真的送到引擎。`MallScene.onSlotTouched` 的两条分支必打日志
-         * （「铺位 …」或「玩家请求开店：…」），所以等到一条即成立。
+         * 点击有没有真的送到引擎。`MallScene.onSlotTouched`、页面层的主按钮与弹窗层的
+         * 开关/确认/取消分支必打日志，所以等到一条即成立。
          * 没这道检查的话，触点掉出视口 = 静默假阴性，会被读成"功能没反应"（SC-M05-QA-002 P1-B）。
          */
         async function waitTouchDelivered(mark, timeoutMs = 1500) {
             const deadline = Date.now() + timeoutMs;
             while (Date.now() < deadline) {
                 for (let i = mark; i < consoleLines.length; i += 1) {
-                    if (/\[m0[56]\] (铺位|玩家请求|切页|主按钮|当前页|点了)/.test(consoleLines[i])) return true;
+                    if (/\[m0[56]\] (铺位|玩家请求|切页|主按钮|当前页|点了|弹窗)/.test(consoleLines[i])) return true;
                 }
                 await sleep(100);
             }
@@ -430,25 +584,53 @@ async function main() {
                     // 改从界面自己打的渲染摘要取证——日志里那行就是各 Label 当时的字符串，
                     // 归因强度不低于从外部读引擎全局，且不需要给产物开调试口子。
                     const applied = consoleLines.filter((l) => l.includes("[m05] 应用")).pop();
+                    // 页面层与弹窗层各一行摘要，内容就是当时写进 Label 的串
                     const render = consoleLines.filter((l) => l.includes("[m06] 渲染")).pop();
-                    if (!applied && !render) {
+                    const popupRender = consoleLines.filter((l) => l.includes("[m06] 弹窗渲染")).pop();
+                    if (!applied && !render && !popupRender) {
                         // 两条都没有就是真读不到，不能当证据——非零退出，别静默过去
                         console.log("  📊 HUD 读数：既无 window.cc，控制台里也没有 [m05] 应用 / [m06] 渲染 行");
                         process.exitCode = 1;
                     } else {
                         const strip = (line) => (line ? line.replace(/^.*?: /, "") : "无");
-                        hudReads.push({ from: "console", server: strip(applied), ui: strip(render) });
+                        hudReads.push({
+                            from: "console",
+                            server: strip(applied),
+                            ui: strip(render),
+                            popup: strip(popupRender),
+                        });
                         console.log(`  📊 服务端侧：${strip(applied)}`);
                         console.log(`  📊 界面侧：${strip(render)}`);
+                        console.log(`  📊 弹窗侧：${strip(popupRender)}`);
                     }
                 } else {
                     const h = JSON.parse(raw);
                     hudReads.push(h);
+                    console.log(`  📊 引擎类=${JSON.stringify(h.engine)}`);
                     console.log(`  📊 金币=${h.coin} 客流=${h.visitor} 招牌=${h.marquee} 在场=${h.guests} 人 飘字=${JSON.stringify(h.floats)}`);
                     if (h.manage) console.log(`  📊 经营页=${JSON.stringify(h.manage)}`);
                     if (h.layout) console.log(`  📊 布局页=${JSON.stringify(h.layout)}`);
+                    if (h.popup !== '无') {
+                        const cells = h.detail ?? h.unlock ?? h.upgrade;
+                        console.log(`  📊 弹窗=${h.popup} 提示=${JSON.stringify(h.popupNotice)} 读数=${JSON.stringify(cells)}`);
+                    }
                     if (h.clickable) console.log(`  📊 可点坐标=${JSON.stringify(h.clickable)}`);
                 }
+            } else if (kind === "reqs") {
+                const label = rest.join(":") || "未命名";
+                const since = apiCalls.slice(reqsMark);
+                reqsMark = apiCalls.length;
+                const writes = since.filter((c) => c.method === "POST" && !c.path.endsWith("/settle"));
+                console.log(`  🌐 请求[${label}]：这一步以来 ${since.length} 个（${since.map((c) => `${c.method} ${c.path}`).join(" | ") || "无"}）`
+                    + `；其中写命令 ${writes.length} 个${writes.length ? ` ← ${writes.map((c) => c.path).join(", ")}` : ""}`
+                    + `；累计 ${apiCalls.length} 个`);
+                reqsSteps.push({ label, since: since.map((c) => `${c.method} ${c.path}`), writes: writes.map((c) => c.path) });
+            } else if (kind === "eval") {
+                // 临时诊断用：产物里到底能不能按类名/按引用取到某个组件，猜不如问运行时。
+                // 表达式在页面里求值，返回值按 JSON 打出来（不进证据文件，只进 stdout）。
+                const expr = rest.join(":");
+                const value = await evaluate(`(() => { try { return JSON.stringify({ ok: true, v: (${expr}) }); } catch (e) { return JSON.stringify({ ok: false, e: String(e) }); } })()`);
+                console.log(`  🧪 eval → ${value}`);
             } else if (kind === "wait") {
                 const secs = Number(rest.join(":"));
                 console.log(`  ⏳ 等待 ${secs}s`);
@@ -480,6 +662,8 @@ async function main() {
         writeFileSync(`${outDir}/drive-console.log`, consoleLines.join("\n") + "\n", "utf8");
         writeFileSync(`${outDir}/drive-exceptions.log`, exceptions.join("\n") + "\n", "utf8");
         writeFileSync(`${outDir}/hud-reads.json`, JSON.stringify(hudReads, null, 2) + "\n", "utf8");
+        writeFileSync(`${outDir}/api-requests.json`, JSON.stringify({ calls: apiCalls, steps: reqsSteps }, null, 2) + "\n", "utf8");
+        console.log(`[m05-drive] 接口调用共 ${apiCalls.length} 个：${apiCalls.map((c) => `${c.method} ${c.path}`).join(" | ") || "无"}`);
         console.log(`[m05-drive] 控制台 ${consoleLines.length} 行、异常 ${exceptions.length} 条`);
         if (exceptions.length) {
             console.log("[m05-drive] ⚠️ 有未捕获异常：");

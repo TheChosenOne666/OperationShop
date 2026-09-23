@@ -7,7 +7,10 @@
 //
 // 坐标约定：设计稿是 @750×1334 的**左上角原点**绝对坐标，Cocos 的 UI 是
 // 父节点中心原点、y 向上。换算集中在 place() 一处，逐屏代码里就不再出现减法。
-import { Color, Label, Node, UITransform } from "cc";
+//
+// 下半部的 Graphics 绘图原语同样收在这里：页面层与弹窗层画的是同一套木面板、圆角牌、
+// 锁与加号角标，散成两份就会漂移（同一个角标在两个文件里画出两种半径这种事）。
+import { Color, Graphics, Label, Node, UITransform } from "cc";
 
 /** 设计稿画布（与场景 Canvas 同值，已在 M04 构建产物验证）。 */
 export const DESIGN_WIDTH = 750;
@@ -116,4 +119,150 @@ export function container(parent: Node, name: string, left: number, top: number,
     node.layer = parent.layer;
     place(node, left, top, width, height);
     return node;
+}
+
+// ---------- 画图（一律以节点自身中心为原点；每个节点一个 Graphics，一次 clear 画完） ----------
+
+/** 铺位三态（架构现状 §10）：S1 未开放、S2 待开业、S3 营业中。页面与弹窗共用同一套判据。 */
+export type SlotState = "S1" | "S2" | "S3";
+
+/**
+ * 重画一个节点的 Graphics。传函数而不是传参数列表，是因为角标这类图要"底 + 记号"
+ * 在同一个 clear 之后连画——分两次调用就会互相抹掉（一个节点只能挂一个 Graphics，
+ * 第二次 addComponent 出来的那个会从 clear() 起把前一个画的东西整片擦掉）。
+ */
+export function paint(node: Node, draw: (g: Graphics) => void): void {
+    const g = node.getComponent(Graphics) ?? node.addComponent(Graphics);
+    draw(g);
+}
+
+/**
+ * 未开放态的压暗与纱罩。主界面用自发光材质压暗（架构现状 §10），页面与弹窗里是重排的
+ * 缩略图，用一层半透明达到同样的「明度」通道，不再多复制一份材质实例。
+ * 稿值：纱罩 #CFC6B8 @35% + brightness .72（即再压一层黑 @28%）。
+ */
+export function paintVeil(g: Graphics, width: number, height: number, state: SlotState): void {
+    g.clear();
+    if (state !== "S1") return;
+    rect(g, width, height, withAlpha(C.veil, 0.35), 10);
+    rect(g, width, height, new Color(0, 0, 0, 71), 10);
+}
+
+export function rounded(g: Graphics, width: number, height: number, radius: number, fill: Color, stroke?: Color, lineWidth = 3): void {
+    g.clear();
+    g.fillColor = fill;
+    g.roundRect(-width / 2, -height / 2, width, height, radius);
+    g.fill();
+    if (stroke) {
+        g.strokeColor = stroke;
+        g.lineWidth = lineWidth;
+        g.roundRect(-width / 2, -height / 2, width, height, radius);
+        g.stroke();
+    }
+}
+
+export function rect(g: Graphics, width: number, height: number, fill: Color, radius = 0): void {
+    g.fillColor = fill;
+    if (radius > 0) g.roundRect(-width / 2, -height / 2, width, height, radius);
+    else g.rect(-width / 2, -height / 2, width, height);
+    g.fill();
+}
+
+export function disc(g: Graphics, diameter: number, fill: Color, stroke?: Color, lineWidth = 3): void {
+    g.fillColor = fill;
+    g.circle(0, 0, diameter / 2);
+    g.fill();
+    if (stroke) ring(g, diameter, stroke, 0, lineWidth);
+}
+
+/** 空心圆或圆角描边框：radius>0 时画成矩形描边（主按钮的金晕、弹窗主按钮的金色光晕用）。 */
+export function ring(
+    g: Graphics,
+    diameter: number,
+    stroke: Color,
+    radius = 0,
+    lineWidth = 3,
+    width = diameter,
+    height = diameter,
+): void {
+    g.strokeColor = stroke;
+    g.lineWidth = lineWidth;
+    if (radius > 0) {
+        g.roundRect(-width / 2, -height / 2, width, height, radius);
+    } else {
+        g.circle(0, 0, diameter / 2);
+    }
+    g.stroke();
+}
+
+/** 折线描边（返回箭头、对勾、关闭钮的两道杠）。 */
+export function strokePath(g: Graphics, color: Color, lineWidth: number, points: Array<[number, number]>): void {
+    g.strokeColor = color;
+    g.lineWidth = lineWidth;
+    points.forEach(([x, y], index) => {
+        if (index === 0) g.moveTo(x, y);
+        else g.lineTo(x, y);
+    });
+    g.stroke();
+}
+
+/** 加号角标（待开业 / 可解锁 / 可升级）。 */
+export function plusBadge(g: Graphics, diameter: number, bg: Color, ringColor: Color, mark: Color): void {
+    g.clear();
+    disc(g, diameter, bg, ringColor, 3);
+    const arm = Math.round(diameter * 0.5);
+    const bar = Math.max(6, Math.round(diameter / 7));
+    g.fillColor = mark;
+    g.roundRect(-bar / 2, -arm / 2, bar, arm, 3);
+    g.roundRect(-arm / 2, -bar / 2, arm, bar, 3);
+    g.fill();
+}
+
+/** 锁形角标（未开放 / 禁用态）。形状通道，转灰度也必须认得出（美术圣经 §9.3）。 */
+export function lockBadge(g: Graphics, diameter: number, bg: Color, ringColor: Color, mark: Color): void {
+    g.clear();
+    disc(g, diameter, bg, ringColor, 3);
+    const body = diameter * 0.3;
+    g.fillColor = mark;
+    g.roundRect(-body / 2, -diameter * 0.17, body, body * 0.85, 2);
+    g.fill();
+    g.strokeColor = mark;
+    g.lineWidth = Math.max(3, Math.round(diameter / 12));
+    g.arc(0, diameter * 0.07, body * 0.48, Math.PI, 0, false);
+    g.stroke();
+}
+
+/** 未开放行的锁牌：圆角木牌 + 锁形，与角标同形状不同底。 */
+export function lockChip(g: Graphics, size: number, bg: Color, border: Color, mark: Color): void {
+    g.clear();
+    rounded(g, size, size, 10, bg, border, 3);
+    g.fillColor = mark;
+    g.roundRect(-8, -10, 16, 13, 2);
+    g.fill();
+    g.strokeColor = mark;
+    g.lineWidth = 4;
+    g.arc(0, 5, 7, Math.PI, 0, false);
+    g.stroke();
+}
+
+/** 右向三角（稿 05 / 06 的前后对照与等级阶梯）。 */
+export function arrowRight(g: Graphics, width: number, height: number, fill: Color): void {
+    g.clear();
+    g.fillColor = fill;
+    g.moveTo(-width / 2, height / 2);
+    g.lineTo(width / 2, 0);
+    g.lineTo(-width / 2, -height / 2);
+    g.close();
+    g.fill();
+}
+
+export function rgba(hex: string, alpha: number): Color {
+    const color = rgb(hex);
+    color.a = Math.round(255 * alpha);
+    return color;
+}
+
+/** 与 rgb 同义，换个名字表明"这里要的是带 alpha 的稿值"。 */
+export function withAlpha(hex: string, alpha: number): Color {
+    return rgba(hex, alpha);
 }

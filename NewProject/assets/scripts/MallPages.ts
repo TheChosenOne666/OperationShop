@@ -23,11 +23,12 @@
 //      BlockInputEvents，否则"看不见的铺位"会被点出去开店。
 //   4. **一个节点只有一个 Graphics**：Graphics 每次重画都从 clear() 起，同一节点挂第二个
 //      会把前一个画的东西抹掉。所以角标这类"底 + 记号"的图一律走一个函数一次画完。
-import { BlockInputEvents, Color, Graphics, Label, Node, Sprite, SpriteFrame, UIOpacity, UITransform } from "cc";
+import { BlockInputEvents, Graphics, Label, Node, Sprite, SpriteFrame, UIOpacity, UITransform } from "cc";
 import type { Config, MallView, ShopView, SlotConfig } from "./ApiTypes";
 import {
     C, CONTENT_WIDTH, DESIGN_WIDTH, FONT, HUD_HEIGHT, MARGIN, SAFE_TOP,
-    container, label, place, rgb,
+    type SlotState,
+    container, disc, label, lockBadge, lockChip, paint, paintVeil, plusBadge, rect, ring, rounded, rgb, strokePath,
 } from "./MallTheme";
 
 /** 三页加主界面。好友页属 M08，导航入口在场景的 HUD 上，这里不管它的内容。 */
@@ -66,8 +67,6 @@ const CARD_GAP = 11;
 /** 经营页店铺行（稿值 706×146、行距 8）。 */
 const ROW_HEIGHT = 146;
 const ROW_GAP = 8;
-/** 三态判据（架构现状 §10：服务端已给够，客户端只查表不推算）。 */
-type SlotState = "S1" | "S2" | "S3";
 
 /** 经营页的一行店铺。行数 = 配置的店铺数，构建一次，渲染只改字符串与显隐。 */
 interface ManageRow {
@@ -507,7 +506,10 @@ export class MallPages {
         this.floors.forEach((floor, index) => {
             const { opened, total } = this.floorProgress(view, floor);
             const head = cells.heads[floor];
-            if (head) head.string = `${opened} / ${total} 已开放`;
+            // 标题那一格是「已开放」= 已解锁的铺位数（§3.2 的口径写的是 unlockedSlots），
+            // 不是已营业数。2026-09-22 用解锁实测撞出来：解开一层 1 个铺位但还没开业时，
+            // 按 opened 数会一直显示 0 / 3，玩家刚花掉的 600 金币在界面上等于没发生。
+            if (head) head.string = `${this.unlockedOn(view, floor)} / ${total} 已开放`;
             const line = cells.boost[index];
             const dot = cells.dots[index];
             if (!line || !dot) return;
@@ -602,7 +604,7 @@ export class MallPages {
     }
 
     /**
-     * 逐层满铺进度：已开业数 / 该层铺位数。
+     * 逐层「已开业数 / 铺位数」。
      * 这是 GDD §6.1 明文许可的**纯计数**，不是判定加成——加成金额只从服务端字段读。
      */
     private floorProgress(view: MallView, floor: number): { opened: number; total: number } {
@@ -613,6 +615,13 @@ export class MallPages {
             return Boolean(shop && shop.prepared);
         }).length;
         return { opened, total: slots.length };
+    }
+
+    /** 逐层**已解锁**数（楼层标题那格「n / m 已开放」用它；满铺加成另算已营业数）。 */
+    private unlockedOn(view: MallView, floor: number): number {
+        return this.deps.config.slots
+            .filter((s) => s.floor === floor && view.unlockedSlots.indexOf(s.id) >= 0)
+            .length;
     }
 
     private fullFloors(view: MallView): number[] {
@@ -639,122 +648,3 @@ function byUnlockOrder(a: SlotConfig, b: SlotConfig): number {
     return a.unlockOrder - b.unlockOrder;
 }
 
-// ---------- 画图（一律以节点自身中心为原点；每个节点一个 Graphics，一次 clear 画完） ----------
-
-/**
- * 重画一个节点的 Graphics。传函数而不是传参数列表，是因为角标这类图要"底 + 记号"
- * 在同一个 clear 之后连画——分两次调用就会互相抹掉（本文件约束 4）。
- */
-function paint(node: Node, draw: (g: Graphics) => void): void {
-    const g = node.getComponent(Graphics) ?? node.addComponent(Graphics);
-    draw(g);
-}
-
-/** 未开放铺位的压暗与纱罩。主界面用自发光材质压暗（架构现状 §10），页面里是重排的
- *  缩略图，用一层半透明达到同样的「明度」通道，不再多复制一份材质实例。稿值：纱罩 #CFC6B8 @35%、brightness .72。 */
-function paintVeil(g: Graphics, width: number, height: number, state: SlotState): void {
-    g.clear();
-    if (state !== "S1") return;
-    rect(g, width, height, withAlpha(C.veil, 0.35), 10);
-    rect(g, width, height, new Color(0, 0, 0, 71), 10);
-}
-
-function rounded(g: Graphics, width: number, height: number, radius: number, fill: Color, stroke?: Color, lineWidth = 3): void {
-    g.clear();
-    g.fillColor = fill;
-    g.roundRect(-width / 2, -height / 2, width, height, radius);
-    g.fill();
-    if (stroke) {
-        g.strokeColor = stroke;
-        g.lineWidth = lineWidth;
-        g.roundRect(-width / 2, -height / 2, width, height, radius);
-        g.stroke();
-    }
-}
-
-function rect(g: Graphics, width: number, height: number, fill: Color, radius = 0): void {
-    g.fillColor = fill;
-    if (radius > 0) g.roundRect(-width / 2, -height / 2, width, height, radius);
-    else g.rect(-width / 2, -height / 2, width, height);
-    g.fill();
-}
-
-function disc(g: Graphics, diameter: number, fill: Color, stroke?: Color, lineWidth = 3): void {
-    g.fillColor = fill;
-    g.circle(0, 0, diameter / 2);
-    g.fill();
-    if (stroke) ring(g, diameter, stroke, 0, lineWidth);
-}
-
-/** 空心圆或圆角描边框：radius>0 时画成矩形描边（主按钮的金晕用）。 */
-function ring(g: Graphics, diameter: number, stroke: Color, radius = 0, lineWidth = 3, width = diameter, height = diameter): void {
-    g.strokeColor = stroke;
-    g.lineWidth = lineWidth;
-    if (radius > 0) {
-        g.roundRect(-width / 2, -height / 2, width, height, radius);
-    } else {
-        g.circle(0, 0, diameter / 2);
-    }
-    g.stroke();
-}
-
-/** 折线描边（返回箭头、对勾）。 */
-function strokePath(g: Graphics, color: Color, lineWidth: number, points: Array<[number, number]>): void {
-    g.strokeColor = color;
-    g.lineWidth = lineWidth;
-    points.forEach(([x, y], index) => {
-        if (index === 0) g.moveTo(x, y);
-        else g.lineTo(x, y);
-    });
-    g.stroke();
-}
-
-/** 加号角标（待开业 / 可解锁）。 */
-function plusBadge(g: Graphics, diameter: number, bg: Color, ringColor: Color, mark: Color): void {
-    g.clear();
-    disc(g, diameter, bg, ringColor, 3);
-    const arm = Math.round(diameter * 0.5);
-    const bar = Math.max(6, Math.round(diameter / 7));
-    g.fillColor = mark;
-    g.roundRect(-bar / 2, -arm / 2, bar, arm, 3);
-    g.roundRect(-arm / 2, -bar / 2, arm, bar, 3);
-    g.fill();
-}
-
-/** 锁形角标（未开放 / 主按钮禁用态）。形状通道，转灰度也必须认得出（§9.3）。 */
-function lockBadge(g: Graphics, diameter: number, bg: Color, ringColor: Color, mark: Color): void {
-    g.clear();
-    disc(g, diameter, bg, ringColor, 3);
-    const body = diameter * 0.3;
-    g.fillColor = mark;
-    g.roundRect(-body / 2, -diameter * 0.17, body, body * 0.85, 2);
-    g.fill();
-    g.strokeColor = mark;
-    g.lineWidth = Math.max(3, Math.round(diameter / 12));
-    g.arc(0, diameter * 0.07, body * 0.48, Math.PI, 0, false);
-    g.stroke();
-}
-
-/** 未开放行的锁牌：圆角木牌 + 锁形，与角标同形状不同底。 */
-function lockChip(g: Graphics, size: number, bg: Color, border: Color, mark: Color): void {
-    g.clear();
-    rounded(g, size, size, 10, bg, border, 3);
-    g.fillColor = mark;
-    g.roundRect(-8, -10, 16, 13, 2);
-    g.fill();
-    g.strokeColor = mark;
-    g.lineWidth = 4;
-    g.arc(0, 5, 7, Math.PI, 0, false);
-    g.stroke();
-}
-
-function rgba(hex: string, alpha: number): Color {
-    const color = rgb(hex);
-    color.a = Math.round(255 * alpha);
-    return color;
-}
-
-/** 与 rgb 同义，换个名字表明"这里要的是带 alpha 的稿值"。 */
-function withAlpha(hex: string, alpha: number): Color {
-    return rgba(hex, alpha);
-}
