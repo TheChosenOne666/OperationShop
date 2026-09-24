@@ -1337,6 +1337,41 @@ func TestSegmentsStayBounded(t *testing.T) {
 	assertTestLedger(t, cfg, state)
 }
 
+// TestNewServiceAcceptsFullSegmentLedger 验证分段数恰处上界的存档仍可加载：
+// 上界校验拦的是「越界」而不是「到顶」（M07 转入的 P2-B 前置，GDD §5.6）。
+// 越界被拒的用例见 TestNewServiceRejectsInvalidSaves 的「分段数超过上界」。
+func TestNewServiceAcceptsFullSegmentLedger(t *testing.T) {
+	service, _, _ := newFundedTestService(t)
+	cfg := service.Configuration()
+	state := service.snapshotState()
+	price := cfg.Shops[0].LevelCoinsPerVisitor[0]
+	// 上界按配置推导：开店 1 段 + 每次升级改价 1 段 + 满铺翻转 1 段。
+	segments := make([]Segment, 1+len(cfg.UpgradeCosts)+1)
+	for i := range segments {
+		segments[i] = Segment{UnitPrice: price}
+	}
+	// 最后一段来过客人：金币恒等式在边界上照常成立。
+	visitors := int64(2)
+	last := &segments[len(segments)-1]
+	last.Visitors, last.Revenue = visitors, visitors*price
+	state.Shops[0].Prepared = true
+	state.Shops[0].Segments = segments
+	state.Shops[0].Visitors = visitors
+	state.Shops[0].Revenue = visitors * price
+	state.Coins += visitors * price
+	store := &memoryStore{state: state, exists: true}
+	loaded, err := NewService(cfg, store, testTime)
+	if err != nil {
+		t.Fatalf("恰处上界的分段账目应可加载：%v", err)
+	}
+	if got := len(loaded.snapshotState().Shops[0].Segments); got != len(segments) {
+		t.Fatalf("加载后分段数 = %d，期望 %d", got, len(segments))
+	}
+	if store.saveCount() != 0 {
+		t.Fatal("加载合法存档不应改写文件")
+	}
+}
+
 // TestFloorBonusAppliesOnlyWhenFloorIsFull 验证满铺加成的生效条件（验收 #6）。
 func TestFloorBonusAppliesOnlyWhenFloorIsFull(t *testing.T) {
 	service, _, _ := newFundedTestService(t)
@@ -2046,6 +2081,17 @@ func TestNewServiceRejectsInvalidSaves(t *testing.T) {
 		{"分段收益超安全整数", func(s *State) {
 			s.Shops[0].Prepared = true
 			s.Shops[0].Segments = []Segment{{UnitPrice: 1, Visitors: maxSafeInteger, Revenue: maxSafeInteger}}
+		}},
+		{"分段数超过上界", func(s *State) {
+			// 逐段恒等式与聚合同样自洽，只有段数越界——拦的就该是段数本身
+			// （M07 转入的 P2-B 前置，GDD §5.6）。
+			s.Shops[0].Prepared = true
+			price := cfg.Shops[0].LevelCoinsPerVisitor[0]
+			segments := make([]Segment, 1+len(cfg.UpgradeCosts)+2)
+			for i := range segments {
+				segments[i] = Segment{UnitPrice: price}
+			}
+			s.Shops[0].Segments = segments
 		}},
 		{"金币与累计账目不匹配", func(s *State) { s.Coins++ }},
 		{"支出与金币恒等式不匹配", func(s *State) { s.Spent++ }},

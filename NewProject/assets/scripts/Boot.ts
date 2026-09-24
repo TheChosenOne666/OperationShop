@@ -1,11 +1,12 @@
-// Boot 场景的启动逻辑：拉一次配置与快照，把服务端给的数字显示出来。
+// Boot 场景的启动逻辑：先确保登录，再拉一次配置与快照，把服务端给的数字显示出来。
 //
 // 刻意不含的东西（ADR 0001 服务端权威 / 客户端零计算）：没有单价表、没有客流公式、
 // 没有本地虚拟时间。界面显示的每一个数都直接来自最近一次服务端响应。
 //
 // 每 5 秒轮询 settle 属于 M05（经营闭环），这里不做；本文件只负责"开机取一次数，然后进主界面"。
+// M07：ensureSession() 在 dev 模式是空操作（开发令牌直通），wechat 模式走微信登录换会话令牌。
 import { _decorator, Component, director, Label } from "cc";
-import { ApiError, fetchConfig, fetchMall } from "./ApiClient";
+import { ApiError, ensureSession, fetchConfig, fetchMall } from "./ApiClient";
 import type { Config, MallView } from "./ApiTypes";
 
 const { ccclass, property } = _decorator;
@@ -19,9 +20,11 @@ export class Boot extends Component {
     private config: Config | null = null;
 
     async start(): Promise<void> {
-        this.write("正在连接本地后端…");
+        this.write("正在连接服务器…");
         try {
-            // 并发取两份：config 决定"上限该不该显示"，mall 决定"现在是多少"。
+            // M07：先登录（dev 模式为空操作），再并发取两份：
+            // config 决定"上限该不该显示"，mall 决定"现在是多少"。
+            await ensureSession();
             const [cfg, mall] = await Promise.all([fetchConfig(), fetchMall()]);
             this.config = cfg;
             this.render(mall);

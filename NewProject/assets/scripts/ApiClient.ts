@@ -4,8 +4,14 @@
 // 传输层用 XMLHttpRequest 而不是 wx.request：构建产物里的 engine-adapter.js / web-adapter.js
 // 会为小游戏平台提供 XHR 适配，这样同一份代码在浏览器预览和小游戏里都能跑。
 // ⚠️ 这是**待实测确认**的假设，不是查证过的事实——首次联调若报"网络错误"，先怀疑这里。
+//
+// M07 会话（两种构建模式，见 tools/m04_build.py 生成 BuildConfig.ts 时的 MALL_AUTH_MODE）：
+//   · dev     —— 用构建期注入的开发令牌直通，ensureSession() 是空操作；
+//   · wechat  —— wx.login 拿 code 换服务端会话令牌；请求带票，收到 SESSION_EXPIRED
+//                自动重登并重放一次（PRD R3）。web-desktop 产物没有 wx，该模式只能在
+//                微信开发者工具 / 真机里跑。
 import { BUILD_CONFIG } from "./BuildConfig";
-import type { Config, MallView, Result } from "./ApiTypes";
+import type { Config, MallView, Result, SessionResponse } from "./ApiTypes";
 
 /** 服务端返回的稳定错误码（internal/api/handler.go）。客户端可据此分支，不要匹配中文提示。 */
 export class ApiError extends Error {
@@ -15,26 +21,88 @@ export class ApiError extends Error {
     }
 }
 
-function request<T>(method: string, path: string): Promise<T> {
+/** 微信小游戏的登录接口（运行时由平台提供；web-desktop 产物里没有它）。 */
+declare const wx:
+    | {
+          login(options: {
+              success: (res: { code: string }) => void;
+              fail: (err: unknown) => void;
+          }): void;
+      }
+    | undefined;
+
+/** 当前会话令牌。dev 模式恒等于开发令牌；wechat 模式登录后由服务端签发。 */
+let sessionToken: string | null = null;
+/** 进行中的登录：并发调用共享同一次登录，避免"登录风暴"（轮询与点击同时触发重登时）。 */
+let loggingIn: Promise<void> | null = null;
+
+/**
+ * 确保已登录，之后每个请求都带令牌。
+ * dev 模式把开发令牌装好即返回；wechat 模式走一次微信登录换会话令牌。
+ * 重复调用是幂等的：已有令牌直接返回，没有令牌时并发调用共享同一次登录。
+ */
+export function ensureSession(): Promise<void> {
+    if (BUILD_CONFIG.authMode !== "wechat") {
+        sessionToken = BUILD_CONFIG.devToken;
+        return Promise.resolve();
+    }
+    if (sessionToken) return Promise.resolve();
+    if (!loggingIn) {
+        loggingIn = wechatLogin().finally(() => {
+            loggingIn = null;
+        });
+    }
+    return loggingIn;
+}
+
+/** wechat 模式的一次登录：wx.login 拿 code → 换会话令牌。失败抛 ApiError（稳定码）。 */
+async function wechatLogin(): Promise<void> {
+    if (typeof wx === "undefined") {
+        throw new ApiError("WECHAT_LOGIN_FAILED", 0);
+    }
+    const code = await new Promise<string>((resolve, reject) => {
+        wx.login({
+            success: (res) => resolve(res.code),
+            fail: () => reject(new ApiError("WECHAT_LOGIN_FAILED", 0)),
+        });
+    });
+    const session = await request<SessionResponse>("POST", "/api/v1/session/wechat", JSON.stringify({ code }), false);
+    sessionToken = session.token;
+    console.log(`[m07] 微信登录成功，会话有效期 ${session.expiresInSeconds} 秒`);
+}
+
+/** 从错误响应里取稳定错误码；响应不是 JSON 时保留 HTTP_xxx。 */
+function errorCodeOf(xhr: XMLHttpRequest): string {
+    try {
+        const body = JSON.parse(xhr.responseText);
+        const inner = body && body.error;
+        if (inner && typeof inner.code === "string") return inner.code;
+    } catch {
+        /* 响应不是 JSON：保留 HTTP_xxx */
+    }
+    return `HTTP_${xhr.status}`;
+}
+
+function request<T>(method: string, path: string, body = "{}", allowRetry = true): Promise<T> {
     return new Promise<T>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open(method, BUILD_CONFIG.baseUrl + path, true);
         xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.setRequestHeader("Authorization", `Bearer ${BUILD_CONFIG.devToken}`);
+        xhr.setRequestHeader("Authorization", `Bearer ${sessionToken ?? BUILD_CONFIG.devToken}`);
         xhr.timeout = 8000;
         xhr.onload = () => {
+            // 会话过期：自动重登并把本请求重放一次（PRD R3）。只重放一次，重登再失败就把错误交出去。
+            if (xhr.status === 401 && allowRetry && errorCodeOf(xhr) === "SESSION_EXPIRED") {
+                sessionToken = null;
+                ensureSession()
+                    .then(() => resolve(request<T>(method, path, body, false)))
+                    .catch(reject);
+                return;
+            }
             if (xhr.status < 200 || xhr.status >= 300) {
                 // 服务端错误体形如 {"error":{"code":"SHOP_NOT_FOUND","message":"店铺不存在"}}
                 // （internal/api/handler.go 的 writeError）。取 code 分支，message 只给人看。
-                let code = `HTTP_${xhr.status}`;
-                try {
-                    const body = JSON.parse(xhr.responseText);
-                    const inner = body && body.error;
-                    if (inner && typeof inner.code === "string") code = inner.code;
-                } catch {
-                    /* 响应不是 JSON：保留 HTTP_xxx */
-                }
-                reject(new ApiError(code, xhr.status));
+                reject(new ApiError(errorCodeOf(xhr), xhr.status));
                 return;
             }
             try {
@@ -46,7 +114,7 @@ function request<T>(method: string, path: string): Promise<T> {
         xhr.onerror = () => reject(new ApiError("NETWORK", 0));
         xhr.ontimeout = () => reject(new ApiError("TIMEOUT", 0));
         // 写命令按契约只接受空对象 {}；GET 带不带无害，统一发 {} 少一个分支。
-        xhr.send("{}");
+        xhr.send(body);
     });
 }
 

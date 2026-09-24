@@ -441,6 +441,14 @@ func (s *Service) unitPrice(state State, shopIndex int) int64 {
 	return s.levelPrice(state, shopIndex) + s.floorBonus(state, shopIndex)
 }
 
+// maxSegments bounds one shop's ledger: the opening segment, one segment per
+// configured upgrade price change, and one full-floor change (GDD §5.6). It is
+// derived from the config so a rule change moves the bound instead of freezing
+// today's numbers into code.
+func (s *Service) maxSegments() int {
+	return 1 + len(s.cfg.UpgradeCosts) + 1
+}
+
 // syncFloorSegments appends a segment for every open shop on one floor whose price changed.
 func (s *Service) syncFloorSegments(state *State, floor int) {
 	for _, shopIndex := range s.floorShops[floor] {
@@ -616,6 +624,14 @@ func (s *Service) validateState(state State) error {
 		}
 		if shop.Prepared && len(shop.Segments) == 0 {
 			return fmt.Errorf("shop %s is open without a ledger segment", shop.ID)
+		}
+		// The ledger only grows at three points: opening the shop, one segment per
+		// configured upgrade price change, and the floor's full state flipping once
+		// (GDD §5.6). Local single-account saves never exceed it by construction, but
+		// M07 started receiving externally maintained saves, where a self-consistent
+		// ledger with any segment count would otherwise pass every identity check.
+		if len(shop.Segments) > s.maxSegments() {
+			return fmt.Errorf("shop %s has %d ledger segments, expected at most %d", shop.ID, len(shop.Segments), s.maxSegments())
 		}
 		var visitors, revenue int64
 		for _, segment := range shop.Segments {

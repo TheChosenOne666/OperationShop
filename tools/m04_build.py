@@ -83,25 +83,34 @@ def read_client_config() -> dict:
 def write_build_config(cfg: dict) -> None:
     """生成 assets/scripts/BuildConfig.ts（不入库）。
 
-    令牌只从环境变量走：`MALL_DEV_TOKEN` 必须与启动服务端时用的那个一致，否则一律 401。
-    为什么不让它进仓库：小游戏的包是明文可读的，把令牌提交进版本库等于公开它。
+    构建模式从环境变量 MALL_AUTH_MODE 读（dev 默认 / wechat），必须与启动服务端时一致：
+      · dev    —— 注入开发令牌（只走环境变量 MALL_DEV_TOKEN，必须与服务端一致，否则一律 401）。
+                 为什么不让它进仓库：小游戏的包是明文可读的，提交进版本库等于公开它。
+      · wechat —— **不注入任何令牌**：客户端启动时走 wx.login 换会话令牌（见 ApiClient.ts）。
+                 把开发令牌打进来没有任何用处（服务端 wechat 模式拒绝它），平白多一个泄露面。
     """
     token = os.environ.get("MALL_DEV_TOKEN", "")
     base = os.environ.get("MALL_BASE_URL", "http://127.0.0.1:18081")
-    if not token:
+    mode = (os.environ.get("MALL_AUTH_MODE") or "dev").strip()
+    if mode not in ("dev", "wechat"):
+        sys.exit(f"MALL_AUTH_MODE 只能是 dev 或 wechat，当前是 {mode!r}。")
+    if mode == "dev" and not token:
         print("  ⚠ 未设 MALL_DEV_TOKEN——生成的客户端不带令牌，请求服务端会全部 401。")
     target = PROJECT / "assets" / "scripts" / "BuildConfig.ts"
     target.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "// 由 tools/m04_build.py 生成，请勿手改、勿提交（见 .gitignore）。",
-        "// 令牌只走环境变量 MALL_DEV_TOKEN：小游戏包是明文可读的，提交进仓库等于公开它。",
+        "// 模式与令牌只走环境变量：MALL_AUTH_MODE（dev/wechat）+ MALL_DEV_TOKEN（仅 dev 需要）。",
         "export const BUILD_CONFIG = {",
         f'    baseUrl: "{base}",',
-        f'    devToken: "{token}",',
-        "};",
+        f'    authMode: "{mode}",',
     ]
+    if mode == "dev":
+        lines.append(f'    devToken: "{token}",')
+    lines.append("};")
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"▶ 生成 BuildConfig.ts：baseUrl={base} token={'已注入' if token else '（空）'}")
+    injected = f"token={'已注入' if token else '（空）'}" if mode == "dev" else "token=（不注入，走微信登录）"
+    print(f"▶ 生成 BuildConfig.ts：baseUrl={base} mode={mode} {injected}")
 
 
 def start_scene_uuid() -> str:

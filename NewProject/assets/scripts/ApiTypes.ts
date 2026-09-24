@@ -104,3 +104,11 @@ export interface Result {
     /** false 表示这次是空转：服务端没改状态、没落盘、revision 也没变。 */
     changed: boolean;
 }
+
+/** POST /api/v1/session/wechat 的响应体（M07 微信登录）。 */
+export interface SessionResponse {
+    /** 服务端签发的会话令牌；之后每个请求都带它（Authorization: Bearer）。 */
+    token: string;
+    /** 令牌有效期（秒）。过期后客户端自动重新登录，玩家无感。 */
+    expiresInSeconds: number;
+}

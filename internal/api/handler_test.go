@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"streetcorner/internal/game"
+	"streetcorner/internal/session"
 )
 
 const (
@@ -183,6 +186,12 @@ type testAPI struct {
 	logger  *slog.Logger
 	service *game.Service
 	handler http.Handler
+	// M07：双模与会话组件。sessions 为 nil 时处理器不带登录路由（M01 原型形态）。
+	mode       Mode
+	sessions   *session.Store
+	accounts   *Accounts
+	exchanger  session.CodeExchanger
+	sessionTTL time.Duration
 }
 
 func newTestAPIWith(t *testing.T, token string, origins []string) *testAPI {
@@ -215,15 +224,103 @@ func newFundedTestAPI(t *testing.T) *testAPI {
 // start 使用当前存档与时钟重建服务与处理器，用于模拟进程重启。
 func (a *testAPI) start() {
 	a.t.Helper()
-	service, err := game.NewService(a.config, a.store, a.clock.now)
-	if err != nil {
-		a.t.Fatalf("创建本地开发服务失败：%v", err)
+	// wechat 模式没有单账号服务：每个请求按会话令牌路由到账号自己的存档。
+	var service *game.Service
+	if a.mode != ModeWechat {
+		built, err := game.NewService(a.config, a.store, a.clock.now)
+		if err != nil {
+			a.t.Fatalf("创建本地开发服务失败：%v", err)
+		}
+		service = built
 	}
-	handler, err := NewHandler(service, Options{DevToken: a.token, AllowedOrigins: a.origins, Logger: a.logger})
+	options := Options{DevToken: a.token, AllowedOrigins: a.origins, Logger: a.logger, Mode: a.mode}
+	if a.mode == ModeWechat {
+		// wechat 模式拒绝任何开发令牌，哪怕测试夹具里预填了一个。
+		options.DevToken = ""
+	}
+	if a.mode == ModeWechat || a.sessions != nil {
+		options.Exchanger, options.Sessions, options.Accounts, options.SessionTTL =
+			a.exchanger, a.sessions, a.accounts, a.sessionTTL
+	}
+	handler, err := NewHandler(service, options)
 	if err != nil {
 		a.t.Fatalf("创建处理器失败：%v", err)
 	}
 	a.service, a.handler = service, handler
+}
+
+// newSessionTestAPI 在开发态上开登录路由（T-3）：假 exchanger + 进程内会话 + 临时账号目录。
+// 开发令牌直通与原有回归断言不受影响，登录是叠加的一条新入口。
+func newSessionTestAPI(t *testing.T, ttl time.Duration) *testAPI {
+	t.Helper()
+	a := newTestAPIWith(t, testDevToken, []string{testOrigin})
+	sessions, err := session.NewStore(ttl, a.clock.now)
+	if err != nil {
+		t.Fatalf("创建会话存储失败：%v", err)
+	}
+	a.sessions = sessions
+	a.accounts = NewAccounts(a.config, t.TempDir(), a.clock.now)
+	a.exchanger = session.DevExchanger{}
+	a.sessionTTL = ttl
+	a.start()
+	return a
+}
+
+// newWechatTestAPI 组装 wechat 模式处理器：无单账号服务、无回环限制、stub exchanger。
+// token 仍预填开发令牌，用于模拟带着旧开发令牌找上门的老客户端。
+func newWechatTestAPI(t *testing.T, exchanger session.CodeExchanger, ttl time.Duration) *testAPI {
+	t.Helper()
+	a := &testAPI{
+		t: t, token: testDevToken, origins: []string{testOrigin}, config: loadTestConfig(t),
+		clock: &stubClock{stamp: testTime()}, logs: &syncBuffer{},
+		mode: ModeWechat, exchanger: exchanger, sessionTTL: ttl,
+	}
+	a.logger = slog.New(slog.NewJSONHandler(a.logs, nil))
+	sessions, err := session.NewStore(ttl, a.clock.now)
+	if err != nil {
+		t.Fatalf("创建会话存储失败：%v", err)
+	}
+	a.sessions = sessions
+	a.accounts = NewAccounts(a.config, t.TempDir(), a.clock.now)
+	a.start()
+	return a
+}
+
+// withSession 把请求的认证头换成会话令牌。
+func withSession(token string) func(*http.Request) {
+	return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token) }
+}
+
+// login 走一遍公开的登录路由，返回签发的会话令牌。
+func (a *testAPI) login(t *testing.T, code string) string {
+	t.Helper()
+	recorder := a.call(http.MethodPost, "/api/v1/session/wechat", `{"code":"`+code+`"}`, dropAuth)
+	assertStatus(t, recorder, http.StatusOK)
+	var body struct {
+		Token            string `json:"token"`
+		ExpiresInSeconds int64  `json:"expiresInSeconds"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析登录响应失败：%v（响应体 %q）", err, recorder.Body.String())
+	}
+	return body.Token
+}
+
+// stubExchanger 是 wechat 模式测试用的假换票：按表回声账号键，可注入失败。
+type stubExchanger struct {
+	keys map[string]string
+	err  error
+}
+
+func (s stubExchanger) Exchange(_ context.Context, code string) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	key, ok := s.keys[code]
+	if !ok {
+		return "", fmt.Errorf("stub exchanger rejects %q", code)
+	}
+	return key, nil
 }
 
 // newRequest 构造默认本机且已认证的请求，mutate 可覆盖默认请求头。
@@ -340,7 +437,7 @@ func TestHealthzIsPublic(t *testing.T) {
 	recorder := a.call(http.MethodGet, "/healthz", "", dropAuth)
 	assertStatus(t, recorder, http.StatusOK)
 	assertSecureHeaders(t, recorder)
-	want := map[string]any{"status": "ok", "mode": "local-development", "wechatLogin": false}
+	want := map[string]any{"status": "ok", "mode": "dev", "wechatLogin": false}
 	if got := decodeBody[map[string]any](t, recorder); !reflect.DeepEqual(got, want) {
 		t.Fatalf("健康检查响应 = %+v，期望 %+v", got, want)
 	}
@@ -810,7 +907,7 @@ func TestRequestLogDoesNotLeakSecrets(t *testing.T) {
 	if strings.Contains(logs, a.token) || strings.Contains(logs, leakSecret) {
 		t.Fatalf("访问日志泄露敏感信息：%s", logs)
 	}
-	if !strings.Contains(logs, "local API request") || !strings.Contains(logs, `"/api/v1/mall"`) {
+	if !strings.Contains(logs, "api request") || !strings.Contains(logs, `"/api/v1/mall"`) {
 		t.Fatalf("访问日志缺少必要字段：%s", logs)
 	}
 }
@@ -824,7 +921,7 @@ func TestWriteCommandLogsCarryResultCode(t *testing.T) {
 	assertErrorCode(t, a.call(http.MethodPost, "/api/v1/shops/coffee/upgrade", "{}"), http.StatusConflict, "SHOP_NOT_OPEN")
 	logs := a.logs.String()
 	for _, want := range []string{
-		`"msg":"local write command"`,
+		`"msg":"write command"`,
 		`"path":"/api/v1/slots/f2-s1/unlock"`,
 		`"code":"OK"`,
 		`"code":"SHOP_NOT_OPEN"`,
@@ -917,4 +1014,299 @@ func TestLoopbackHelpers(t *testing.T) {
 			t.Fatalf("loopbackRemote(%q) = %t，期望 %t", remote, got, want)
 		}
 	}
+}
+
+// TestSessionLoginIssuesToken 验证登录路由：公开、严格验体、签发可用令牌（PRD R1/R2）。
+func TestSessionLoginIssuesToken(t *testing.T) {
+	a := newSessionTestAPI(t, 10*time.Minute)
+	recorder := a.call(http.MethodPost, "/api/v1/session/wechat", `{"code":"alice"}`, dropAuth)
+	assertStatus(t, recorder, http.StatusOK)
+	assertSecureHeaders(t, recorder)
+	var body struct {
+		Token            string `json:"token"`
+		ExpiresInSeconds int64  `json:"expiresInSeconds"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析登录响应失败：%v（%q）", err, recorder.Body.String())
+	}
+	if len(body.Token) != 64 || strings.Trim(body.Token, "0123456789abcdef") != "" {
+		t.Fatalf("会话令牌必须是 64 位十六进制：%q", body.Token)
+	}
+	if body.ExpiresInSeconds != 600 {
+		t.Fatalf("有效期回执 = %d，期望 600", body.ExpiresInSeconds)
+	}
+	// 响应不得夹带账号标识（客户端不需要，也避免把 openid 派生键暴露给抓包者）。
+	if strings.Contains(recorder.Body.String(), "dev-alice") {
+		t.Fatalf("登录响应不应包含账号键：%q", recorder.Body.String())
+	}
+	// 令牌可用：带它走一次读路由。
+	if recorder := a.call(http.MethodGet, "/api/v1/mall", "", withSession(body.Token)); recorder.Code != http.StatusOK {
+		t.Fatalf("带会话令牌的请求应放行：%d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+// TestSessionLoginRejectsBadBodies 验证登录请求体的四态与大小限制。
+func TestSessionLoginRejectsBadBodies(t *testing.T) {
+	a := newSessionTestAPI(t, 10*time.Minute)
+	cases := []struct {
+		name   string
+		body   string
+		mutate func(*http.Request)
+		status int
+		code   string
+	}{
+		{"缺少请求类型", `{"code":"alice"}`, func(r *http.Request) { r.Header.Del("Content-Type") }, http.StatusUnsupportedMediaType, "JSON_REQUIRED"},
+		{"错误请求类型", `{"code":"alice"}`, func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, http.StatusUnsupportedMediaType, "JSON_REQUIRED"},
+		{"空对象", `{}`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"空code", `{"code":""}`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"code不是字符串", `{"code":123}`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"多带字段", `{"code":"alice","openid":"x"}`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"顶层数组", `[]`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"两个JSON值", `{"code":"alice"} {"code":"bob"}`, nil, http.StatusBadRequest, "INVALID_COMMAND"},
+		{"请求体超限", `{"code":"` + strings.Repeat("x", 2000) + `"}`, nil, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.mutate == nil {
+				tc.mutate = func(*http.Request) {}
+			}
+			recorder := a.call(http.MethodPost, "/api/v1/session/wechat", tc.body, append([]func(*http.Request){dropAuth}, tc.mutate)...)
+			assertErrorCode(t, recorder, tc.status, tc.code)
+		})
+	}
+	// 假 exchanger 拒绝的 code（含路径字符）：401 且细节不进响应体。
+	recorder := a.call(http.MethodPost, "/api/v1/session/wechat", `{"code":"../alice"}`, dropAuth)
+	assertErrorCode(t, recorder, http.StatusUnauthorized, "WECHAT_CODE_REJECTED")
+	if strings.Contains(recorder.Body.String(), "development code") {
+		t.Fatalf("换票失败细节不得返回客户端：%q", recorder.Body.String())
+	}
+	if !strings.Contains(a.logs.String(), "wechat code exchange failed") {
+		t.Fatal("换票失败必须留服务端日志")
+	}
+}
+
+// TestSessionTokenLifecycle 验证无票、未知票、过期票与重新登录（PRD R2/R3）。
+func TestSessionTokenLifecycle(t *testing.T) {
+	a := newSessionTestAPI(t, 10*time.Minute)
+	// 无票：开发态沿用 UNAUTHORIZED。
+	assertErrorCode(t, a.call(http.MethodGet, "/api/v1/mall", "", dropAuth), http.StatusUnauthorized, "UNAUTHORIZED")
+	// 未知票：开发态同样 UNAUTHORIZED（既不是活会话也不是开发令牌）。
+	assertErrorCode(t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(strings.Repeat("f", 64))), http.StatusUnauthorized, "UNAUTHORIZED")
+	token := a.login(t, "alice")
+	assertStatus(t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(token)), http.StatusOK)
+	// 过期：推进时钟越过寿命 → SESSION_EXPIRED，且不写任何存档。
+	saves := a.store.saveCount()
+	a.clock.set(a.clock.now().Add(11 * time.Minute))
+	assertErrorCode(t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(token)), http.StatusUnauthorized, "SESSION_EXPIRED")
+	if a.store.saveCount() != saves {
+		t.Fatal("被拒绝的请求不得写入存档")
+	}
+	// 重新登录拿新票，继续可用（数据不丢：账号存档在目录里）。
+	renewed := a.login(t, "alice")
+	if renewed == token {
+		t.Fatal("重新登录必须签发新令牌")
+	}
+	assertStatus(t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(renewed)), http.StatusOK)
+}
+
+// TestAccountsAreIsolated 验证不同账号各有一份存档、互不可见（PRD R4）。
+func TestAccountsAreIsolated(t *testing.T) {
+	a := newSessionTestAPI(t, 10*time.Minute)
+	alice, bob := a.login(t, "alice"), a.login(t, "bob")
+	// alice 开一家店。
+	assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}", withSession(alice)), http.StatusOK)
+	aliceView := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(alice)))
+	if aliceView.Revision != 2 || !aliceView.Shops[0].Prepared {
+		t.Fatalf("alice 的存档应已推进：%+v", aliceView)
+	}
+	// bob 看到的是自己刚建的初始档。
+	bobView := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(bob)))
+	if bobView.Revision != 1 || bobView.Shops[0].Prepared {
+		t.Fatalf("bob 的存档不应受 alice 影响：%+v", bobView)
+	}
+	// 开发令牌直通的单账号存档也不受会话账号影响（仍是 revision 1 的初始档）。
+	if view := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "")); view.Revision != 1 || view.Shops[0].Prepared {
+		t.Fatalf("开发态单账号存档不应被会话账号污染：%+v", view)
+	}
+	// 两个账号各有一个存档文件，名字来自账号键。
+	for _, name := range []string{"dev-alice.json", "dev-bob.json"} {
+		if _, err := os.Stat(filepath.Join(a.accounts.dir, name)); err != nil {
+			t.Fatalf("缺少账号存档 %s：%v", name, err)
+		}
+	}
+}
+
+// TestConcurrentCommandsPerAccountCommitOnce 验证同账号并发写只提交一次（PRD 验收 #2）。
+func TestConcurrentCommandsPerAccountCommitOnce(t *testing.T) {
+	a := newSessionTestAPI(t, 10*time.Minute)
+	alice, bob := a.login(t, "alice"), a.login(t, "bob")
+	const workers = 50
+	start := make(chan struct{})
+	results := make(chan game.Result, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			recorder := httptest.NewRecorder()
+			a.handler.ServeHTTP(recorder, a.newRequest(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}", withSession(alice)))
+			if recorder.Code != http.StatusOK {
+				results <- game.Result{}
+				return
+			}
+			var result game.Result
+			if json.Unmarshal(recorder.Body.Bytes(), &result) != nil {
+				results <- game.Result{}
+				return
+			}
+			results <- result
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	changed := 0
+	for result := range results {
+		if result.Changed {
+			changed++
+		}
+		if result.EarnedCoins != 0 || result.VisitorsUsed != 0 {
+			t.Fatal("同一时刻并发开店不应产出收益")
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("同账号并发开店应只生效一次：changed=%d", changed)
+	}
+	if view := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(alice))); view.Revision != 2 {
+		t.Fatalf("alice 存档修订号 = %d，期望 2", view.Revision)
+	}
+	if view := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(bob))); view.Revision != 1 {
+		t.Fatalf("bob 存档不应被并发写波及：%+v", view)
+	}
+}
+
+// TestWechatModeRejectsMisconfiguration 验证 wechat 模式的构造强校验。
+func TestWechatModeRejectsMisconfiguration(t *testing.T) {
+	service := newTestService(t)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	sessions, err := session.NewStore(time.Minute, testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := NewAccounts(loadTestConfig(t), t.TempDir(), testTime)
+	exchanger := stubExchanger{keys: map[string]string{"code-a": "key-a"}}
+	base := Options{Mode: ModeWechat, Exchanger: exchanger, Sessions: sessions, Accounts: accounts, Logger: logger}
+	cases := []struct {
+		name    string
+		service *game.Service
+		options Options
+	}{
+		{"带了单账号服务", service, base},
+		{"带了开发令牌", nil, withDevToken(base, testDevToken)},
+		{"缺少exchanger", nil, withoutField(base, "exchanger")},
+		{"缺少sessions", nil, withoutField(base, "sessions")},
+		{"缺少accounts", nil, withoutField(base, "accounts")},
+		{"注入开发假换票", nil, withExchanger(base, session.DevExchanger{})},
+		{"未知模式", nil, withMode(base, "carrier-pigeon")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if handler, err := NewHandler(tc.service, tc.options); handler != nil || err == nil {
+				t.Fatalf("非法配置必须被拒绝：%v，%v", handler, err)
+			}
+		})
+	}
+	// 合法配置可用。
+	if handler, err := NewHandler(nil, base); handler == nil || err != nil {
+		t.Fatalf("合法 wechat 配置应创建处理器：%v", err)
+	}
+}
+
+// TestWechatModeServesWithoutLoopback 验证 wechat 模式取消回环限制、拒绝开发令牌（PRD R7）。
+func TestWechatModeServesWithoutLoopback(t *testing.T) {
+	a := newWechatTestAPI(t, stubExchanger{keys: map[string]string{"code-a": "key-a"}}, 10*time.Minute)
+	// 健康检查报 wechat 模式。
+	want := map[string]any{"status": "ok", "mode": "wechat", "wechatLogin": true}
+	if got := decodeBody[map[string]any](t, a.call(http.MethodGet, "/healthz", "", dropAuth)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("健康检查响应 = %+v，期望 %+v", got, want)
+	}
+	token := a.login(t, "code-a")
+	// 外部主机头与外部来源地址：不再被 LOCAL_ONLY 拦下。
+	external := []func(*http.Request){
+		func(r *http.Request) { r.Host, r.RemoteAddr = "mall.example.com:443", "203.0.113.9:51000" },
+	}
+	for _, mutate := range external {
+		merged := append([]func(*http.Request){withSession(token)}, mutate)
+		if recorder := a.call(http.MethodGet, "/api/v1/mall", "", merged...); recorder.Code != http.StatusOK {
+			t.Fatalf("wechat 模式应放行外部请求：%d %q", recorder.Code, recorder.Body.String())
+		}
+	}
+	// 开发令牌在 wechat 模式不是有效凭证。
+	assertErrorCode(t, a.call(http.MethodGet, "/api/v1/mall", ""), http.StatusUnauthorized, "SESSION_INVALID")
+}
+
+// TestWechatModeLoginFlow 验证 wechat 模式全链路：登录→带票→写命令→账号隔离→坏档隔离。
+func TestWechatModeLoginFlow(t *testing.T) {
+	a := newWechatTestAPI(t, stubExchanger{keys: map[string]string{"code-a": "key-a", "code-b": "key-b"}}, 10*time.Minute)
+	// 换票失败：稳定码给客户端，细节只进日志。
+	failing := newWechatTestAPI(t, stubExchanger{err: errors.New("wechat is down")}, 10*time.Minute)
+	recorder := failing.call(http.MethodPost, "/api/v1/session/wechat", `{"code":"code-a"}`, dropAuth)
+	assertErrorCode(t, recorder, http.StatusUnauthorized, "WECHAT_CODE_REJECTED")
+	if strings.Contains(recorder.Body.String(), "wechat is down") {
+		t.Fatalf("换票失败细节不得返回客户端：%q", recorder.Body.String())
+	}
+	if !strings.Contains(failing.logs.String(), "wechat code exchange failed") {
+		t.Fatal("换票失败必须留服务端日志")
+	}
+	// 正常链路：登录 → 开店 → 结算。
+	alice := a.login(t, "code-a")
+	assertStatus(t, a.call(http.MethodPost, "/api/v1/shops/coffee/prepare", "{}", withSession(alice)), http.StatusOK)
+	a.clock.set(testTime().Add(5 * time.Second))
+	result := decodeBody[game.Result](t, a.call(http.MethodPost, "/api/v1/mall/settle", "{}", withSession(alice)))
+	if !result.Changed || result.EarnedCoins != a.config.Shops[0].LevelCoinsPerVisitor[0] {
+		t.Fatalf("带会话令牌的结算结果不符：%+v", result)
+	}
+	// 账号隔离：另一个账号是初始档。
+	bob := a.login(t, "code-b")
+	if view := decodeBody[game.MallView](t, a.call(http.MethodGet, "/api/v1/mall", "", withSession(bob))); view.Revision != 1 {
+		t.Fatalf("bob 的存档应独立：%+v", view)
+	}
+	// 坏档只拖累本账号：预置一份损坏存档，登录后请求 500，另一账号不受影响。
+	broken := newWechatTestAPI(t, stubExchanger{keys: map[string]string{"code-a": "key-a", "code-b": "key-b"}}, 10*time.Minute)
+	if err := os.WriteFile(filepath.Join(broken.accounts.dir, "key-a.json"), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	brokenAlice := broken.login(t, "code-a")
+	assertErrorCode(t, broken.call(http.MethodGet, "/api/v1/mall", "", withSession(brokenAlice)), http.StatusInternalServerError, "SAVE_FAILED")
+	brokenBob := broken.login(t, "code-b")
+	assertStatus(t, broken.call(http.MethodGet, "/api/v1/mall", "", withSession(brokenBob)), http.StatusOK)
+}
+
+func withDevToken(options Options, token string) Options {
+	options.DevToken = token
+	return options
+}
+
+func withExchanger(options Options, exchanger session.CodeExchanger) Options {
+	options.Exchanger = exchanger
+	return options
+}
+
+func withMode(options Options, mode Mode) Options {
+	options.Mode = mode
+	return options
+}
+
+// withoutField 逐项清掉必填组件，用于构造缺字段的非法配置。
+func withoutField(options Options, field string) Options {
+	switch field {
+	case "exchanger":
+		options.Exchanger = nil
+	case "sessions":
+		options.Sessions = nil
+	case "accounts":
+		options.Accounts = nil
+	}
+	return options
 }
