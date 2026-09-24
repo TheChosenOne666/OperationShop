@@ -245,13 +245,14 @@ export class MallPages {
         label(order, "Text", "按客流到店顺序排列（一层临街优先）", FONT.sub, C.woodDark,
             20, 5, CONTENT_WIDTH - 20, 30, false, Label.HorizontalAlign.LEFT);
 
-        // 页内提示位（稿的 336 是「不含提示位」的净布局，这里给提示让出 22px，见 docs/M06 §9.5）
-        const notice = label(page, "Notice", "", FONT.sub, C.woodDark, MARGIN, 328, CONTENT_WIDTH, 26, false);
+        // 页内提示位与布局页同一槽（顶栏标题右侧，buildTopBar 已把标题收成 200 宽让出 x≥320）：
+        // 放在列表上方会把整张列表顶到 358，五行底缘 1120 距禁放线只剩 1px（SC-M06-QA-002 002-02）
+        const notice = label(page, "Notice", "", FONT.sub, C.woodDark, 320, 60, CONTENT_WIDTH - 320 + MARGIN, 26, false);
         notice.node.active = false;
         this.notices.set("manage", notice);
 
         // 列表顺序 = 服务端 shops 数组顺序（一层优先，§7.2 冲突 A 已解决），客户端不自己排
-        const list = container(page, "List", MARGIN, 358, CONTENT_WIDTH,
+        const list = container(page, "List", MARGIN, 336, CONTENT_WIDTH,
             this.deps.config.shops.length * (ROW_HEIGHT + ROW_GAP) - ROW_GAP);
         this.rows = this.deps.config.shops.map((shop, index) => this.buildManageRow(list, shop.id, index));
     }
@@ -524,7 +525,10 @@ export class MallPages {
             });
             line.string = fullFloor
                 ? `${floorLabel(floor)} ${opened} / ${total} 已满铺 —— 该层单客收益 +${bonus}（已生效）`
-                : `${floorLabel(floor)} ${opened} / ${total} —— 再开放 ${total - opened} 个铺位即可获得 +${bonus}`;
+                : `${floorLabel(floor)} ${opened} / ${total} 已开业 —— 再开 ${total - opened} 家店即可获得 +${bonus}`;
+                // 不照稿 01 的「再开放 K 个铺位」写：那句的分子是已解锁数，而满铺要的是每间都解锁且开业
+                //（floorFull）。跟规则走并把措辞改成「开业」，免得与标题「n / m 已开放」同词两义。
+                // 主理人 2026-09-24 裁定：docs/M06-验收口径评审.md §4、架构现状 §7.2 冲突 R。
         });
 
         // 主按钮三态：可解锁（金晕 + 加号）/ 金币不足（暗 + 锁 + 写出差多少）/ 全部已解锁
