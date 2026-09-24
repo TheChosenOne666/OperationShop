@@ -28,6 +28,7 @@ export const ERROR_TEXT: Readonly<Record<string, string>> = {
     // ---- 会话与传输 ----
     UNAUTHORIZED: "本地会话失效，请重新进入游戏",
     ORIGIN_DENIED: "浏览器来源未获允许",
+    LOCAL_ONLY: "这个服务只能在开发机上访问",
     NETWORK: "连接中断，稍后会自动重试",
     TIMEOUT: "连接超时，稍后会自动重试",
     BAD_RESPONSE_JSON: "服务端响应无法解析",

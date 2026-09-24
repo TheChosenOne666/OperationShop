@@ -478,6 +478,10 @@ export class MallPopups {
         const slot = this.deps.config.slots.find((s) => s.id === slotId);
         const cost = view.nextUnlockCost;
         if (!slot || cost === null || view.nextSlotId !== slot.id) {
+            // 写命令在飞时这条**必然**成立：服务端已受理、nextSlotId 前移，而响应先经
+            // MallScene.render() 再到 acknowledgeWrite()。此时既不能假报警，也不能
+            // closeAll 连带关掉垫在下面的详情——关弹窗由回执驱动（acknowledgeWrite）。
+            if (this.pending) return;
             console.error(`[m06] 解锁确认的数据不再成立（${slotId}），关掉弹窗`);
             this.closeAll();
             return;
@@ -494,6 +498,9 @@ export class MallPopups {
         cells.coins.string = `${view.coins}`;
         // 余额是**确认前预览**：两个服务端字段相减（D-4 裁定允许；稿上"需服务端返回"那句由这条口径结清）
         cells.balance.string = `${view.coins - cost} 金币`;
+        // 稿 05 的金币账配色：花费 gold-deep、余额 green-deep（.mrow .neg / .left），现有行默认
+        cells.cost.color = rgb(C.goldDeep);
+        cells.balance.color = rgb(C.greenDeep);
 
         const { total } = this.floorProgress(view, slot.floor);
         // 稿 05 那一行「二层进度变成 2 / 3」说的是**已解锁**数（与布局页标题「n / m 已开放」同一把尺），
@@ -530,6 +537,10 @@ export class MallPopups {
         const cost = shop?.upgradeCost ?? null;
         const next = shop?.nextUnitPrice ?? null;
         if (!shop || cost === null || next === null) {
+            // 与 renderUnlock 同源：升到满级那一次，upgradeCost 随受理响应变 null，
+            // 而 render() 先于 acknowledgeWrite() 跑。pending 在飞时放行关弹窗会连带
+            // 关掉详情，「Lv5 MAX / 已达最高等级」的当场交代就丢了（SC-M06-QA-001 P1-2）。
+            if (this.pending) return;
             console.error(`[m06] 升级确认的数据不再成立（${shopId}），关掉弹窗`);
             this.closeAll();
             return;
@@ -547,6 +558,9 @@ export class MallPopups {
         cells.cost.string = `− ${cost} 金币`;
         cells.coins.string = `${view.coins}`;
         cells.balance.string = `${view.coins - cost} 金币`;
+        // 稿 06 与稿 05 同一套金币账配色：花费 gold-deep、余额 green-deep
+        cells.cost.color = rgb(C.goldDeep);
+        cells.balance.color = rgb(C.greenDeep);
 
         // 规则说明不得省略（R-07）：生效时点 + 历史收益不追溯，数字取该店 revenue 原值
         cells.rule.string = `升级从下一位到店的客人开始生效；\n已经赚到的 ${shop.revenue} 金币不会改变，也不会被重新计算。`;
@@ -1019,11 +1033,11 @@ export class MallPopups {
     }
 
     private fullFloors(view: MallView): number[] {
+        // 与页面层同口径：满铺与否读服务端的 floorBonus，不在客户端计数判定
+        //（ADR 0001 纯算术一节把「判满铺是否生效」列为禁止项，SC-M06-QA-001 P2-4）
         const floors = Array.from(new Set(this.deps.config.slots.map((s) => s.floor))).sort((a, b) => a - b);
-        return floors.filter((floor) => {
-            const { opened, total } = this.floorProgress(view, floor);
-            return total > 0 && opened === total;
-        });
+        return floors.filter((floor) =>
+            view.shops.some((shop) => shop.floor === floor && shop.floorBonus > 0));
     }
 
     private push(name: PopupName): void {

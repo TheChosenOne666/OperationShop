@@ -704,7 +704,9 @@ async function main(): Promise<void> {
     check("服务端会返回的其余码也在表内（新增码漏配要在这里红）", () => {
         // 这份清单逐条对 internal/api/handler.go 的 writeError；服务端加码而界面没配，
         // 就会落到「操作未生效 XXX」那条兜底串上——验收第 8 条要求的是逐个映射，不是兜底。
-        for (const code of ["CLOCK_BACKWARDS", "NUMERIC_LIMIT", "SAVE_FAILED", "UNAUTHORIZED"]) {
+        // 不含 JSON_REQUIRED / BODY_TOO_LARGE / INVALID_COMMAND：那三个只由协议层错误触发，
+        // 客户端恒发 {} + 正确 Content-Type，不可达（不为不可能发生的场景配文案）。
+        for (const code of ["CLOCK_BACKWARDS", "NUMERIC_LIMIT", "SAVE_FAILED", "UNAUTHORIZED", "ORIGIN_DENIED", "LOCAL_ONLY"]) {
             assert.ok(Object.prototype.hasOwnProperty.call(ERROR_TEXT, code), `${code} 没进映射表`);
         }
     });

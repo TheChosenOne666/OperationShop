@@ -102,7 +102,7 @@ export class MallPages {
     private rows: ManageRow[] = [];
     private cards: LayoutCard[] = [];
     private floors: number[] = [];
-    private manageCells: { visitors: Label; earned: Label; bonus: Label } | null = null;
+    private todayCells: { visitors: Label; earned: Label; bonus: Label } | null = null;
     private layoutCells: { heads: Record<number, Label>; dots: Graphics[]; boost: Label[]; action: Node; actionOpacity: UIOpacity; actionCorner: Node; actionText: Label; actionCost: Label } | null = null;
     /** 最近一次渲染用的快照。按钮点击要判禁用态，只读服务端给的字段，不推算（验收第 2 条）。 */
     private lastView: MallView | null = null;
@@ -513,9 +513,11 @@ export class MallPages {
             const line = cells.boost[index];
             const dot = cells.dots[index];
             if (!line || !dot) return;
-            // 加成金额取服务端配置的显示值，本文件不出现那个数本身
+            // 加成金额取服务端配置的显示值，本文件不出现那个数本身；
+            // 「是否已生效」同样由服务端回答——该层任一店的 floorBonus > 0 即满铺
+            //（ADR 0001 纯算术一节：判满铺是禁止项，SC-M06-QA-001 P2-4）
             const bonus = this.deps.config.fullFloorBonus;
-            const fullFloor = total > 0 && opened === total;
+            const fullFloor = view.shops.some((shop) => shop.floor === floor && shop.floorBonus > 0);
             paint(dot.node, (g) => {
                 if (fullFloor) disc(g, 14, rgb(C.gold));
                 else ring(g, 14, rgb(C.woodDark));
@@ -529,6 +531,9 @@ export class MallPages {
         const slot = this.nextSlot(view);
         const cost = view.nextUnlockCost;
         const affordable = slot !== null && cost !== null && view.coins >= cost;
+        // 全部铺位已解锁是**终态**不是"被挡住"：不给锁角标、不压暗（锁=被挡住，与"已全部开放"语义相反；
+        // 稿没画这一态，按同一套编码往下推，登记于 docs/M06 §10.3 按实调整）
+        const done = slot === null;
         if (slot && cost !== null && !affordable) {
             // 稿：禁用态不写「金币不足」而写差多少；禁止变红（红=危险，违反无失败态）
             cells.actionText.string = `再攒 ${cost - view.coins} 金币`;
@@ -542,6 +547,7 @@ export class MallPages {
         }
         paint(cells.actionCorner, (g) => {
             if (affordable) plusBadge(g, 56, rgb(C.gold), rgb(C.woodLine), rgb(C.woodLine));
+            else if (done) g.clear();
             else lockBadge(g, 56, rgb(C.veil), rgb(C.woodLine), rgb(C.woodLine));
         });
         paint(cells.action, (g) => {
@@ -549,12 +555,14 @@ export class MallPages {
                 // 稿：可解锁带金色呼吸光晕（1.6s 呼吸属表现层，M06 先做静态金晕）
                 ring(g, CONTENT_WIDTH + 10, rgb(C.gold), 16, 5, CONTENT_WIDTH + 10, 122);
                 rounded(g, CONTENT_WIDTH, 112, 14, rgb(C.woodMid), rgb(C.woodLine), 4);
+            } else if (done) {
+                rounded(g, CONTENT_WIDTH, 112, 14, rgb(C.woodMid), rgb(C.woodLine), 4);
             } else {
                 rounded(g, CONTENT_WIDTH, 112, 14, rgb(C.woodDark), rgb(C.woodLine), 4);
             }
         });
-        // 稿：禁用态不透明度 78%（仍 ≥3:1 可见），不是"灰到看不见"
-        cells.actionOpacity.opacity = affordable ? 255 : Math.round(255 * 0.78);
+        // 稿：禁用态不透明度 78%（仍 ≥3:1 可见），不是"灰到看不见"；终态满不透明度
+        cells.actionOpacity.opacity = affordable || done ? 255 : Math.round(255 * 0.78);
         this.summary("布局页",
             `进度=${this.floors.map((floor) => `${floorLabel(floor)}:${cells.heads[floor]?.string ?? "?"}`).join(" ")} | `
             + `加成=${cells.boost.map((line) => line.string).join(" / ")} | `
@@ -569,7 +577,9 @@ export class MallPages {
         const slot = view ? this.nextSlot(view) : null;
         const cost = view?.nextUnlockCost ?? null;
         if (!view || !slot || cost === null) {
-            console.log("[m06] 布局页主按钮被点，但没有可解锁铺位（已满铺），忽略");
+            // 文案以「主按钮」开头：驱动器的点击送达检查按 [m06] 后的关键词匹配，
+            // 写成「布局页主按钮被点」会被判成"事件没送到"的假阴性（2026-09-23 实测）
+            console.log("[m06] 主按钮被点，但没有可解锁铺位（已满铺），忽略");
             return;
         }
         if (view.coins < cost) {
@@ -625,10 +635,10 @@ export class MallPages {
     }
 
     private fullFloors(view: MallView): number[] {
-        return this.floors.filter((floor) => {
-            const { opened, total } = this.floorProgress(view, floor);
-            return total > 0 && opened === total;
-        });
+        // 满铺与否由服务端的 floorBonus 回答（ADR 0001 纯算术一节把「判满铺是否生效」列为禁止项，
+        // 服务端为此给了逐店 floorBonus）。逐层计数只用于显示「n / m」，不用于判定。
+        return this.floors.filter((floor) =>
+            view.shops.some((shop) => shop.floor === floor && shop.floorBonus > 0));
     }
 }
 
